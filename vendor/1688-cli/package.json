@@ -1,0 +1,93 @@
+{
+  "name": "1688-cli",
+  "version": "0.1.47",
+  "description": "1688.com CLI for humans, Codex, and Claude Code. Product search, supplier scraper/research, inquiry, cart, orders, logistics, and seller chat.",
+  "license": "MIT",
+  "author": "nobodyjack",
+  "homepage": "https://github.com/superjack2050/1688-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superjack2050/1688-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/superjack2050/1688-cli/issues"
+  },
+  "keywords": [
+    "1688",
+    "alibaba",
+    "cli",
+    "agent",
+    "ai-agent",
+    "claude",
+    "claude-code",
+    "codex",
+    "automation",
+    "scraper",
+    "supplier-scraper",
+    "supplier-search",
+    "product-scraper",
+    "sourcing",
+    "ecommerce",
+    "procurement",
+    "playwright",
+    "mtop",
+    "wholesale",
+    "china"
+  ],
+  "type": "module",
+  "bin": {
+    "1688": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "scripts/postinstall.mjs",
+    "scripts/fix_bin_mode.mjs",
+    "scripts/generate_agent_context.mjs",
+    "scripts/check_agent_map.mjs",
+    "scripts/check_release.mjs",
+    "docs",
+    "AGENTS.md",
+    "ARCHITECTURE.md",
+    "README.md",
+    "README_zh-CN.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.json && node scripts/fix_bin_mode.mjs",
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude tests/doctor-live.test.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "agent-context": "node scripts/generate_agent_context.mjs",
+    "docs-check": "node scripts/generate_agent_context.mjs --check",
+    "agent-map-check": "node scripts/check_agent_map.mjs",
+    "release-check": "node scripts/check_release.mjs",
+    "agent-verify": "pnpm typecheck && pnpm test:unit && pnpm docs-check && pnpm agent-map-check && pnpm release-check",
+    "prepublishOnly": "pnpm release-check && pnpm build",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "iconv-lite": "^0.7.2",
+    "playwright": "^1.48.0",
+    "playwright-extra": "^4.3.6",
+    "proper-lockfile": "^4.1.2",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "qrcode": "^1.5.4",
+    "update-notifier": "^7.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/qrcode": "^1.5.6",
+    "@types/update-notifier": "^6.0.8",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

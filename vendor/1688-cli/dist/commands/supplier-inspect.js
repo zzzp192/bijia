@@ -1,0 +1,559 @@
+import { dispatch } from '../session/dispatch.js';
+import { emit, info } from '../io/output.js';
+import { CliError } from '../io/errors.js';
+import { parseMtopJsonp } from '../session/mtop.js';
+import { startResponseCapture } from '../session/response-capture.js';
+import { withRecovery } from '../session/recovery.js';
+import { sleep } from '../session/wait.js';
+const SHOPCARD_API_RE = /mtop\.1688\.moga\.pc\.shopcard/i;
+const FACTORY_CARD_API_RE = /mtop\.com\.alibaba\.china\.factory\.card\.common\.fn\.mtop\.tpp\.faas/i;
+export async function run(opts) {
+    normalizeSupplierTarget(opts.target);
+    const data = await dispatch('supplier-inspect', { target: opts.target, headed: opts.headed }, { headed: opts.headed, profile: opts.profile });
+    emit({
+        human: () => printSupplierInspect(data),
+        data,
+    });
+}
+export async function execute(ctx, args) {
+    normalizeSupplierTarget(args.target);
+    return withRecovery(ctx, { cmd: 'supplier-inspect', args }, () => executeRaw(ctx, args), { headed: args.headed === true, maxRetries: 1 });
+}
+async function executeRaw(ctx, args) {
+    const target = normalizeSupplierTarget(args.target);
+    const warnings = [];
+    let offerProbe = null;
+    let factoryProbe = null;
+    let memberId = target.memberId;
+    if (target.type === 'offerId' && target.offerId) {
+        offerProbe = await inspectOfferTarget(ctx, target.offerId);
+        memberId = offerProbe.seller?.memberId ?? memberId;
+        if (!memberId && offerProbe.shopCard?.factoryCardUrl) {
+            memberId = extractMemberIdFromUrl(offerProbe.shopCard.factoryCardUrl);
+        }
+        if (!memberId) {
+            warnings.push('Offer page did not expose a supplier memberId; factory-card enrichment skipped.');
+        }
+    }
+    if (memberId) {
+        try {
+            factoryProbe = await inspectFactoryCard(ctx, memberId);
+        }
+        catch (error) {
+            if (target.type === 'memberId')
+                throw error;
+            warnings.push(`Factory-card enrichment failed: ${errorMessage(error)}`);
+        }
+    }
+    const result = assembleSupplierInspectResult({
+        target: { ...target, memberId: target.memberId ?? memberId ?? null },
+        offerProbe,
+        factoryProbe,
+        warnings,
+    });
+    if (!hasSupplierIdentity(result)) {
+        throw new CliError(9, 'SUPPLIER_NOT_FOUND', `Could not inspect supplier from target: ${args.target}`);
+    }
+    return result;
+}
+async function inspectOfferTarget(ctx, offerId) {
+    const page = await ctx.newPage();
+    const offerUrl = `https://detail.1688.com/offer/${offerId}.html`;
+    const shopCapture = startResponseCapture({
+        page,
+        timeoutMs: 5000,
+        matcher: SHOPCARD_API_RE,
+        parse: async (resp) => mapShopCardPayload(parseMtopJsonp(await resp.text())),
+    });
+    try {
+        info(`Inspecting supplier from offer ${offerId}...`);
+        await goto1688(page, offerUrl, 'offer page');
+        await page
+            .waitForFunction(() => {
+            const w = window;
+            return !!(w.context?.result?.global?.globalData?.model?.sellerModel ||
+                w.context?.result?.data?.productTitle?.fields?.shopInfo);
+        }, { timeout: 10000 })
+            .catch(() => { });
+        await sleep(1500);
+        const seller = await readOfferSellerContext(page);
+        const shopCard = await shopCapture.wait();
+        return {
+            offerUrl,
+            seller,
+            shopCard,
+            shopcardCaptured: shopCard !== null,
+        };
+    }
+    finally {
+        shopCapture.dispose();
+        await page.close().catch(() => { });
+    }
+}
+async function inspectFactoryCard(ctx, memberId) {
+    const page = await ctx.newPage();
+    const factoryCardUrl = buildFactoryCardUrl(memberId);
+    const factoryCapture = startResponseCapture({
+        page,
+        timeoutMs: 15000,
+        matcher: FACTORY_CARD_API_RE,
+        parse: async (resp) => mapFactoryCardPayload(parseMtopJsonp(await resp.text())),
+    });
+    try {
+        info(`Inspecting factory card ${memberId}...`);
+        await goto1688(page, factoryCardUrl, 'factory card');
+        await sleep(4000);
+        const text = await page
+            .evaluate(() => document.body?.innerText ?? '')
+            .catch(() => '');
+        const factory = await factoryCapture.wait();
+        return {
+            factoryCardUrl,
+            factory,
+            availableOfferCount: parseAvailableOfferCount(text),
+            factoryCardCaptured: factory !== null,
+        };
+    }
+    finally {
+        factoryCapture.dispose();
+        await page.close().catch(() => { });
+    }
+}
+async function goto1688(page, url, label) {
+    try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+    catch (error) {
+        throw new CliError(9, 'NETWORK_ERROR', `Failed to load ${label}: ${errorMessage(error)}`);
+    }
+    if (/login\.1688\.com|login\.taobao\.com/.test(page.url())) {
+        throw new CliError(3, 'NOT_LOGGED_IN', 'Session expired. Run `1688 login`.');
+    }
+    if (/punish|sec|risk|nocaptcha/i.test(page.url())) {
+        throw new CliError(8, 'RISK_CONTROL', '1688 risk control appeared. Retry with `--headed` and complete verification.');
+    }
+}
+async function readOfferSellerContext(page) {
+    const raw = await page
+        .evaluate(() => {
+        const w = window;
+        const seller = w.context?.result?.global?.globalData?.model?.sellerModel ?? {};
+        const shopInfo = w.context?.result?.data?.productTitle?.fields?.shopInfo ?? {};
+        const feg = w.FE_GLOBALS ?? {};
+        return {
+            name: seller.companyName ?? shopInfo.companyName ?? shopInfo.authCompanyName ?? null,
+            loginId: seller.loginId ?? feg.offerLoginId ?? feg.loginId ?? null,
+            memberId: seller.memberId ?? feg.memberId ?? null,
+            userId: seller.userId != null ? String(seller.userId) : null,
+            identity: seller.sellerIdentity ?? null,
+            sellerSign: seller.sellerSign ?? null,
+            shopUrl: seller.winportUrl ?? seller.sellerWinportUrlMap?.defaultUrl ?? null,
+            shopUrls: seller.sellerWinportUrlMap ?? {},
+        };
+    })
+        .catch(() => null);
+    if (!raw)
+        return null;
+    return {
+        name: stringOrNull(raw.name),
+        loginId: stringOrNull(raw.loginId),
+        memberId: stringOrNull(raw.memberId),
+        userId: stringOrNull(raw.userId),
+        identity: stringOrNull(raw.identity),
+        signs: booleanRecordFromSellerSign(raw.sellerSign),
+        shopUrl: stringOrNull(raw.shopUrl),
+        shopUrls: stringRecord(raw.shopUrls),
+    };
+}
+export function normalizeSupplierTarget(raw) {
+    const input = (raw ?? '').trim();
+    if (!input) {
+        throw new CliError(2, 'BAD_INPUT', 'Supplier target is required.');
+    }
+    const fromUrl = parseTargetUrl(input);
+    if (fromUrl)
+        return fromUrl;
+    if (/^\d+$/.test(input)) {
+        return { input, type: 'offerId', offerId: input, memberId: null };
+    }
+    if (isMemberId(input)) {
+        return { input, type: 'memberId', offerId: null, memberId: input };
+    }
+    throw new CliError(2, 'BAD_INPUT', 'Unsupported supplier target. Use an offerId, offer URL, b2b-* memberId, or factory-card URL. loginId-only lookup is not reliable yet.');
+}
+function parseTargetUrl(input) {
+    let url;
+    try {
+        url = new URL(input);
+    }
+    catch {
+        return null;
+    }
+    const offerFromPath = url.pathname.match(/\/offer\/(\d+)(?:\.html)?/);
+    const offerId = offerFromPath?.[1] ?? url.searchParams.get('offerId');
+    if (offerId && /^\d+$/.test(offerId)) {
+        return { input, type: 'offerId', offerId, memberId: null };
+    }
+    const memberId = url.searchParams.get('memberId');
+    if (memberId && isMemberId(memberId)) {
+        return { input, type: 'memberId', offerId: null, memberId };
+    }
+    return null;
+}
+export function mapShopCardPayload(payload) {
+    const data = objectAt(payload, ['data']);
+    if (!data)
+        return null;
+    const factoryInfo = objectAt(data, ['factoryInfo']);
+    const shopProperty = objectAt(factoryInfo, ['shopProperty']);
+    const appData = objectAt(data, ['appData']);
+    const lindormData = objectAt(data, ['lindormDataModel']);
+    const serviceRaw = arrayAt(appData, ['serviceList']) ?? arrayAt(lindormData, ['serviceStarList']) ?? [];
+    const mapped = {
+        companyName: stringOrNull(data.companyName),
+        companyId: stringOrNull(data.companyId),
+        companyLabel: stringOrNull(data.companyLabel),
+        retentionRate: numberOrNull(data.retentionRate),
+        companyIcons: arrayAt(data, ['companyIcons'])
+            .map((item) => ({
+            title: stringOrNull(item.title) ?? '',
+            link: normalizeUrl(stringOrNull(item.link)),
+        }))
+            .filter((item) => item.title),
+        shopTags: arrayAt(factoryInfo, ['shopTag'])
+            .map((item) => stringOrNull(item.text))
+            .filter((text) => text !== null),
+        factoryCardUrl: normalizeUrl(stringOrNull(shopProperty?.pcLinkUrl) ?? stringOrNull(shopProperty?.linkUrl)),
+        factoryAuthText: stringOrNull(shopProperty?.authText),
+        serviceScores: serviceRaw.map(mapServiceScore).filter((score) => score.key),
+    };
+    if (!mapped.companyName &&
+        !mapped.companyId &&
+        !mapped.companyLabel &&
+        mapped.companyIcons.length === 0 &&
+        mapped.shopTags.length === 0 &&
+        !mapped.factoryCardUrl &&
+        !mapped.factoryAuthText &&
+        mapped.serviceScores.length === 0) {
+        return null;
+    }
+    return mapped;
+}
+export function mapFactoryCardPayload(payload) {
+    const result = objectAt(payload, ['data', 'result']);
+    if (!result)
+        return null;
+    const employee = objectAt(result, ['employeeData']);
+    const employeeProductNum = objectAt(employee, ['productNum']);
+    const tags = uniqueStrings([
+        ...extractTagTexts(result.highQualityTagList),
+        ...extractTagTexts(result.fcProcessTag),
+        ...extractTagTexts(result.crossBorderAbility),
+        ...extractTagTexts(result.foreignTrade),
+        ...extractTagTexts(result.license),
+        ...extractTagTexts(result.sesameCredit),
+    ]);
+    return {
+        name: stringOrNull(result.name),
+        loginId: stringOrNull(result.loginId),
+        memberId: stringOrNull(result.memberId),
+        shopUrl: normalizeUrl(stringOrNull(result.shopPcWpIndexUrl)),
+        tpYears: parseInteger(result.tpYears),
+        medalLevel: stringOrNull(result.medalLevel),
+        thirdPartyAuthProvider: stringOrNull(result.factory3rdPartyAuthProvider),
+        establishedAtText: stringOrNull(result.companyYearStarted),
+        location: stringOrNull(result.location),
+        address: stringOrNull(result.factoryDetailedAddress),
+        latitude: numberOrNull(result.factoryLatitude),
+        longitude: numberOrNull(result.factoryLongitude),
+        productionService: stringOrNull(result.productionService),
+        employeeScale: stringOrNull(employee?.workerNum2) ??
+            stringOrNull(employeeProductNum?.productNum),
+        workerCount: stringOrNull(employee?.deepWorkerNum2),
+        profile: stringOrNull(result.factoryProfile),
+        superFactory: result.superFactory === true,
+        tags,
+    };
+}
+export function parseAvailableOfferCount(text) {
+    const compact = text.replace(/\s+/g, '');
+    const match = compact.match(/共(\d+)个商品/) ??
+        compact.match(/工厂店共(\d+)个商品/) ??
+        compact.match(/全部商品.*?(\d+)个/);
+    if (!match)
+        return null;
+    return parseInteger(match[1]);
+}
+export function assembleSupplierInspectResult(input) {
+    const offerSeller = input.offerProbe?.seller ?? null;
+    const shopCard = input.offerProbe?.shopCard ?? null;
+    const factory = input.factoryProbe?.factory ?? null;
+    const shopTags = uniqueStrings([
+        ...(shopCard?.shopTags ?? []),
+        ...(shopCard?.factoryAuthText ? [shopCard.factoryAuthText] : []),
+    ]);
+    const factoryTags = uniqueStrings([
+        ...(factory?.tags ?? []),
+        ...shopTags,
+    ]);
+    const signs = offerSeller?.signs ?? {};
+    const shopUrls = {
+        ...(offerSeller?.shopUrls ?? {}),
+        ...(factory?.shopUrl ? { defaultUrl: factory.shopUrl } : {}),
+    };
+    const availableCount = input.factoryProbe?.availableOfferCount ?? null;
+    return {
+        target: input.target,
+        supplier: {
+            name: factory?.name ?? offerSeller?.name ?? shopCard?.companyName ?? null,
+            loginId: factory?.loginId ?? offerSeller?.loginId ?? null,
+            memberId: factory?.memberId ?? offerSeller?.memberId ?? input.target.memberId,
+            userId: offerSeller?.userId ?? null,
+            companyId: shopCard?.companyId ?? null,
+            shopUrl: factory?.shopUrl ?? offerSeller?.shopUrl ?? null,
+            shopUrls,
+            identity: offerSeller?.identity ?? null,
+            signs,
+        },
+        factory: {
+            isFactory: factory !== null ||
+                signs.isFactoryDealer === true ||
+                signs.isSlsj === true ||
+                factoryTags.length > 0,
+            superFactory: factory?.superFactory ?? false,
+            tpYears: factory?.tpYears ?? null,
+            medalLevel: factory?.medalLevel ?? null,
+            thirdPartyAuthProvider: factory?.thirdPartyAuthProvider ?? null,
+            establishedAtText: factory?.establishedAtText ?? null,
+            location: factory?.location ?? null,
+            address: factory?.address ?? null,
+            coordinates: {
+                latitude: factory?.latitude ?? null,
+                longitude: factory?.longitude ?? null,
+            },
+            productionService: factory?.productionService ?? null,
+            employeeScale: factory?.employeeScale ?? null,
+            workerCount: factory?.workerCount ?? null,
+            profile: factory?.profile ?? null,
+            tags: factoryTags,
+        },
+        trust: {
+            companyLabel: shopCard?.companyLabel ?? null,
+            retentionRate: shopCard?.retentionRate ?? null,
+            companyIcons: shopCard?.companyIcons ?? [],
+            shopTags,
+            serviceScores: shopCard?.serviceScores ?? [],
+        },
+        offers: {
+            availableCount,
+            source: availableCount !== null ? 'factory-card-dom' : null,
+        },
+        sources: {
+            offerUrl: input.offerProbe?.offerUrl ?? null,
+            factoryCardUrl: input.factoryProbe?.factoryCardUrl ?? null,
+            shopcardCaptured: input.offerProbe?.shopcardCaptured ?? false,
+            factoryCardCaptured: input.factoryProbe?.factoryCardCaptured ?? false,
+        },
+        warnings: input.warnings ?? [],
+    };
+}
+function printSupplierInspect(data) {
+    const s = data.supplier;
+    process.stdout.write(`${s.name ?? s.loginId ?? s.memberId ?? data.target.input}\n`);
+    if (s.loginId || s.memberId || s.userId) {
+        process.stdout.write(`  identity: ${[
+            s.loginId ? `loginId=${s.loginId}` : '',
+            s.memberId ? `memberId=${s.memberId}` : '',
+            s.userId ? `userId=${s.userId}` : '',
+        ].filter(Boolean).join(' · ')}\n`);
+    }
+    if (s.shopUrl)
+        process.stdout.write(`  shop:     ${s.shopUrl}\n`);
+    const years = data.factory.tpYears !== null ? `${data.factory.tpYears}年` : null;
+    const auth = data.factory.thirdPartyAuthProvider
+        ? `${data.factory.thirdPartyAuthProvider.toUpperCase()}认证`
+        : null;
+    const factoryLine = [
+        data.factory.isFactory ? 'factory' : null,
+        data.factory.superFactory ? 'super-factory' : null,
+        years,
+        auth,
+        data.factory.medalLevel ? `medal ${data.factory.medalLevel}` : null,
+    ].filter(Boolean).join(' · ');
+    if (factoryLine)
+        process.stdout.write(`  factory:  ${factoryLine}\n`);
+    if (data.factory.location || data.factory.address) {
+        process.stdout.write(`  address:  ${[data.factory.location, data.factory.address].filter(Boolean).join(' · ')}\n`);
+    }
+    if (data.factory.productionService) {
+        process.stdout.write(`  products: ${data.factory.productionService}\n`);
+    }
+    if (data.offers.availableCount !== null) {
+        process.stdout.write(`  offers:   ${data.offers.availableCount}\n`);
+    }
+    if (data.trust.shopTags.length) {
+        process.stdout.write(`  tags:     ${data.trust.shopTags.slice(0, 8).join(' · ')}\n`);
+    }
+    if (data.trust.serviceScores.length) {
+        const scores = data.trust.serviceScores
+            .map((score) => `${score.label}:${score.score ?? '?'}`)
+            .join(' · ');
+        process.stdout.write(`  scores:   ${scores}\n`);
+    }
+    for (const warning of data.warnings) {
+        process.stdout.write(`  warning:  ${warning}\n`);
+    }
+}
+function buildFactoryCardUrl(memberId) {
+    return `https://sale.1688.com/factory/card.html?memberId=${encodeURIComponent(memberId)}`;
+}
+function hasSupplierIdentity(result) {
+    return !!(result.supplier.name ||
+        result.supplier.loginId ||
+        result.supplier.memberId ||
+        result.supplier.shopUrl);
+}
+function extractMemberIdFromUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const memberId = parsed.searchParams.get('memberId');
+        return memberId && isMemberId(memberId) ? memberId : null;
+    }
+    catch {
+        return null;
+    }
+}
+function isMemberId(value) {
+    return /^b2b-[A-Za-z0-9_-]+$/.test(value);
+}
+function booleanRecordFromSellerSign(raw) {
+    const out = {};
+    if (!raw || typeof raw !== 'object')
+        return out;
+    const rec = raw;
+    for (const [key, value] of Object.entries(rec)) {
+        if (typeof value === 'boolean')
+            out[key] = value;
+    }
+    const nested = rec.signs;
+    if (nested && typeof nested === 'object') {
+        for (const [key, value] of Object.entries(nested)) {
+            if (typeof value === 'boolean')
+                out[key] = value;
+        }
+    }
+    return out;
+}
+function mapServiceScore(raw) {
+    const rec = raw && typeof raw === 'object' ? raw : {};
+    const key = stringOrNull(rec.serviceKey) ?? '';
+    return {
+        key,
+        label: serviceScoreLabel(key),
+        score: numberOrNull(rec.score),
+    };
+}
+function serviceScoreLabel(key) {
+    const labels = {
+        cst_group_value_new: 'response',
+        lgt_group_value_new: 'logistics',
+        dspt_group_value: 'dispute',
+        goods_group_value: 'goods',
+        rdf_group_value_new: 'repurchase',
+    };
+    return labels[key] ?? key;
+}
+function objectAt(value, path) {
+    let current = value;
+    for (const key of path) {
+        if (!current || typeof current !== 'object')
+            return null;
+        current = current[key];
+    }
+    return current && typeof current === 'object'
+        ? current
+        : null;
+}
+function arrayAt(value, path) {
+    const current = path.length ? objectAt(value, path.slice(0, -1)) : value;
+    const key = path.at(-1);
+    const arr = key && current && typeof current === 'object'
+        ? current[key]
+        : current;
+    return Array.isArray(arr) ? arr : [];
+}
+function stringOrNull(value) {
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed ? trimmed : null;
+    }
+    if (typeof value === 'number' && Number.isFinite(value))
+        return String(value);
+    return null;
+}
+function numberOrNull(value) {
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'string')
+        return null;
+    const n = Number(value.trim().replace('%', ''));
+    return Number.isFinite(n) ? n : null;
+}
+function parseInteger(value) {
+    const text = stringOrNull(value);
+    if (!text)
+        return null;
+    const match = text.match(/\d+/);
+    if (!match)
+        return null;
+    const n = parseInt(match[0], 10);
+    return Number.isFinite(n) ? n : null;
+}
+function stringRecord(value) {
+    const out = {};
+    if (!value || typeof value !== 'object')
+        return out;
+    for (const [key, raw] of Object.entries(value)) {
+        const text = stringOrNull(raw);
+        if (text)
+            out[key] = text;
+    }
+    return out;
+}
+function normalizeUrl(value) {
+    if (!value)
+        return null;
+    if (value.startsWith('//'))
+        return `https:${value}`;
+    return value;
+}
+function extractTagTexts(value) {
+    if (!value)
+        return [];
+    if (typeof value === 'string')
+        return [value];
+    if (Array.isArray(value))
+        return value.flatMap(extractTagTexts);
+    if (typeof value !== 'object')
+        return [];
+    const rec = value;
+    const direct = stringOrNull(rec.text) ??
+        stringOrNull(rec.name) ??
+        stringOrNull(rec.title) ??
+        stringOrNull(rec.label) ??
+        stringOrNull(rec.tagName);
+    if (direct)
+        return [direct];
+    return [];
+}
+function uniqueStrings(values) {
+    return [
+        ...new Set(values
+            .map((value) => value.trim())
+            .filter((value) => value && !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/i.test(value))),
+    ];
+}
+function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+//# sourceMappingURL=supplier-inspect.js.map

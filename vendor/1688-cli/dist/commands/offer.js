@@ -1,0 +1,606 @@
+import { dispatch } from '../session/dispatch.js';
+import { emit, info } from '../io/output.js';
+import { CliError } from '../io/errors.js';
+import { withRecovery } from '../session/recovery.js';
+import { sleep } from '../session/wait.js';
+import { parseMtop } from '../session/mtop.js';
+import { startResponseCapture } from '../session/response-capture.js';
+import { debugTmpPath } from '../util/temp.js';
+const SKU_API_RE = /wosc\.queryofferskuselectormodel/i;
+let DETAIL_SEQ = 0;
+export async function execute(ctx, args) {
+    if (!/^\d+$/.test(args.offerId)) {
+        throw new CliError(2, 'BAD_INPUT', `Invalid offerId: ${args.offerId}`);
+    }
+    return withRecovery(ctx, { cmd: 'offer', args }, () => executeRaw(ctx, args), { headed: args.headed === true, maxRetries: 1 });
+}
+export async function executeRaw(ctx, args) {
+    const page = await ctx.newPage();
+    const skuCapture = startResponseCapture({
+        page,
+        timeoutMs: 18000,
+        matcher: SKU_API_RE,
+        parse: async (resp) => {
+            const text = await resp.text();
+            if (process.env.BB1688_PROBE === '1') {
+                try {
+                    const fs = await import('node:fs/promises');
+                    const file = debugTmpPath('1688-sku-raw.json');
+                    await fs.writeFile(file, text);
+                    process.stderr.write(`[probe] saved sku → ${file} (${text.length} bytes)\n`);
+                }
+                catch {
+                    /* ignore */
+                }
+            }
+            const json = parseMtop(text);
+            return json?.data?.skuSelectorBizModel ?? null;
+        },
+    });
+    const onResp = async (resp) => {
+        // Probe: save every offerdetail.service response so we can see which
+        // call carries productAttributes.
+        if (process.env.BB1688_PROBE === '1' &&
+            /mmga\.offerdetail\.service/i.test(resp.url())) {
+            try {
+                const text = await resp.text();
+                const fs = await import('node:fs/promises');
+                DETAIL_SEQ++;
+                const file = debugTmpPath(`1688-offerdetail-${String(DETAIL_SEQ).padStart(2, '0')}.json`);
+                await fs.writeFile(file, text);
+                process.stderr.write(`[probe] saved offerdetail → ${file} (${text.length} bytes)\n`);
+            }
+            catch {
+                /* ignore */
+            }
+        }
+    };
+    page.on('response', onResp);
+    if (process.env.BB1688_PROBE === '1') {
+        const log = (line) => process.stderr.write(line + '\n');
+        log('[probe] active (offer)');
+        let mtopSeq = 0;
+        let htmlSeq = 0;
+        page.on('response', async (resp) => {
+            const u = resp.url();
+            const ct = resp.headers()['content-type'] ?? '';
+            if (/\.(png|jpg|jpeg|gif|webp|css|woff2?|svg|ico|mp4|ttf|otf|js|map)(\?|$)/i.test(u))
+                return;
+            if (/mmstat\.com|google-analytics|alicdn\.com\/sufei/.test(u))
+                return;
+            try {
+                const path = new URL(u).pathname;
+                // mtop OR any non-mtop XHR-style endpoint (wosc.*, *.json, etc.)
+                const isApi = /mtop[.\/]|wosc\.|h5api|\/api\/|\/ajax\/|\.json/i.test(path) ||
+                    /json/i.test(ct);
+                if (isApi) {
+                    let body = '';
+                    try {
+                        body = await resp.text();
+                    }
+                    catch {
+                        /* ignore */
+                    }
+                    const offerHits = (body.match(/"offerId|offerId":/g) ?? []).length;
+                    const titleHits = (body.match(/"subject"|"title"/g) ?? []).length;
+                    const priceHits = (body.match(/"price"|priceInfo|priceRange/g) ?? [])
+                        .length;
+                    log(`[api ] ${path.slice(0, 80)} ct=${ct.slice(0, 25)} bodyLen=${body.length} offerId×${offerHits} title×${titleHits} price×${priceHits}`);
+                    if (body.length > 3000 && (offerHits > 0 || titleHits > 0)) {
+                        try {
+                            const fs = await import('node:fs/promises');
+                            const seq = (++mtopSeq).toString().padStart(2, '0');
+                            const tag = path.split('/').filter(Boolean).pop() ?? 'api';
+                            const file = debugTmpPath(`1688-offer-mtop-${seq}-${tag.slice(0, 40)}.json`);
+                            await fs.writeFile(file, body);
+                            log(`[api ] saved → ${file}`);
+                        }
+                        catch {
+                            /* ignore */
+                        }
+                    }
+                    return;
+                }
+                // HTML responses on detail.1688.com — likely SSR shell with inline data
+                if (/detail\.1688\.com|detail\.m\.1688\.com/.test(u) &&
+                    /text\/html/i.test(ct)) {
+                    const body = await resp.text();
+                    try {
+                        const fs = await import('node:fs/promises');
+                        const seq = (++htmlSeq).toString().padStart(2, '0');
+                        const file = debugTmpPath(`1688-offer-page-${seq}.html`);
+                        await fs.writeFile(file, body);
+                        // Probe for known inline-JSON variables.
+                        const markers = [
+                            'window.runParams',
+                            'window.detailData',
+                            'window.context',
+                            'window.offerDetail',
+                            'window.__INITIAL_DATA__',
+                            'window.__detail__',
+                            'window.__VITA_DATA__',
+                            'window.dataLayer',
+                            '"offerId":',
+                            '"subject":',
+                            '"sellerLoginId":',
+                        ];
+                        const hits = markers.filter((k) => body.includes(k));
+                        log(`[html] saved → ${file} (${body.length} bytes) markers=[${hits.join(', ')}]`);
+                    }
+                    catch {
+                        /* ignore */
+                    }
+                }
+            }
+            catch {
+                /* ignore */
+            }
+        });
+    }
+    const url = `https://detail.1688.com/offer/${args.offerId}.html`;
+    try {
+        info(`Fetching offer ${args.offerId}...`);
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        }
+        catch (e) {
+            throw new CliError(9, 'NETWORK_ERROR', `Failed to load offer page: ${e.message}`);
+        }
+        if (/login\.1688\.com|login\.taobao\.com/.test(page.url())) {
+            throw new CliError(3, 'NOT_LOGGED_IN', 'Session expired. Run `1688 login`.');
+        }
+        const sku = await skuCapture.wait();
+        const pageInfo = await readPageInfo(page);
+        return assemble(args.offerId, url, sku, pageInfo);
+    }
+    finally {
+        skuCapture.dispose();
+        page.off('response', onResp);
+    }
+}
+/**
+ * Extract product info from the inline `window.context.result.data` JS
+ * object that 1688 ships in the SSR HTML response. Bypasses fragile DOM
+ * selectors by letting Playwright serialize the parsed JS object back to
+ * Node over the wire.
+ *
+ * Falls back to DOM scraping if the inline data isn't available for some
+ * reason (e.g. server rendered a fallback view).
+ */
+async function readPageInfo(page) {
+    const debug = process.env.BB1688_DEBUG === '1';
+    if (debug) {
+        page.on('console', (msg) => {
+            const t = msg.text();
+            if (t.includes('[bb1688-probe]') || t.includes('[bb1688]'))
+                process.stderr.write(t + '\n');
+        });
+    }
+    try {
+        await page.waitForFunction(() => {
+            const w = window;
+            return !!w.context?.result?.data?.productTitle?.fields;
+        }, { timeout: 8000 });
+    }
+    catch {
+        return scrapeDomFallback(page);
+    }
+    // Modest scroll to trigger lazy modules near the SKU + 参数 section.
+    // Avoid scrolling to bottom — 1688 detail pages infinite-scroll related
+    // products there, which can hang the renderer.
+    try {
+        await page.evaluate(() => window.scrollTo(0, 1500));
+        await sleep(1000);
+        await page.evaluate(() => window.scrollTo(0, 3000));
+        await sleep(1000);
+    }
+    catch {
+        /* best-effort */
+    }
+    const fromContext = await page
+        .evaluate((debugMode) => {
+        const w = window;
+        const d = w.context?.result?.data;
+        if (!d)
+            return null;
+        const feg = w.FE_GLOBALS ?? {};
+        // description module — has detailUrl + leafCategoryId.
+        const descFields = d.description?.fields ?? {};
+        // Product attributes live in a deeply-nested branch (1688 typically
+        // serializes them under `globalData.model.offerDetail.featureAttributes`,
+        // but the wrapping path varies). Walk the entire window.context tree
+        // (bounded depth) looking for the canonical featureAttributes array.
+        const attributes = [];
+        const root = (w.context ?? d);
+        const stack = [{ v: root, depth: 0 }];
+        while (stack.length && attributes.length === 0) {
+            const { v, depth } = stack.shift();
+            if (depth > 12)
+                continue;
+            if (!v || typeof v !== 'object')
+                continue;
+            if (Array.isArray(v)) {
+                // Detect attribute-list array shape.
+                if (v.length > 0 && typeof v[0] === 'object' && v[0] !== null) {
+                    const first = v[0];
+                    if (typeof first.name === 'string' &&
+                        ('value' in first || 'values' in first)) {
+                        for (const item of v) {
+                            if (!item || typeof item !== 'object')
+                                continue;
+                            const it = item;
+                            const name = typeof it.name === 'string' ? it.name.trim() : '';
+                            let value = '';
+                            if (typeof it.value === 'string')
+                                value = it.value;
+                            else if (Array.isArray(it.values))
+                                value = it.values
+                                    .filter((x) => typeof x === 'string')
+                                    .join(',');
+                            if (name && value)
+                                attributes.push({ name, value });
+                        }
+                    }
+                }
+                for (const item of v)
+                    stack.push({ v: item, depth: depth + 1 });
+            }
+            else {
+                // Prioritize keys that hint at attribute containers.
+                const obj = v;
+                // Direct hit
+                const direct = obj.featureAttributes ?? obj.productAttributes ?? obj.attributes;
+                if (Array.isArray(direct))
+                    stack.unshift({ v: direct, depth: depth + 1 });
+                for (const k of Object.keys(obj))
+                    stack.push({ v: obj[k], depth: depth + 1 });
+            }
+        }
+        // Package info — per-SKU dimensions/weight (件重尺).
+        const packRaw = d.productPackInfo?.fields?.pieceWeightScale?.pieceWeightScaleInfo;
+        const packageInfo = [];
+        if (Array.isArray(packRaw)) {
+            for (const p of packRaw) {
+                if (!p || typeof p !== 'object')
+                    continue;
+                const o = p;
+                packageInfo.push({
+                    skuId: o.skuId != null ? String(o.skuId) : '',
+                    spec: o.sku1 ?? '',
+                    length: o.length ?? null,
+                    width: o.width ?? null,
+                    height: o.height ?? null,
+                    weight: o.weight ?? null,
+                    volume: o.volume ?? null,
+                });
+            }
+        }
+        // Page is organized by widget modules; real data lives in `<mod>.fields`.
+        const productTitle = d.productTitle?.fields ?? {};
+        const gallery = d.gallery?.fields ?? {};
+        const shop = productTitle.shopInfo ?? {};
+        const imgs = [];
+        const rawImgs = gallery.mainImage;
+        if (Array.isArray(rawImgs)) {
+            for (const img of rawImgs) {
+                if (typeof img === 'string')
+                    imgs.push(img);
+                else if (img && typeof img === 'object') {
+                    const o = img;
+                    const url = o.fullPathImageURI ?? o.size310x310ImageURI ?? o.imageURI ?? '';
+                    if (url) {
+                        imgs.push(url.startsWith('http') ? url : `https://cbu01.alicdn.com/${url}`);
+                    }
+                }
+            }
+        }
+        const catId = descFields.leafCategoryId != null
+            ? String(descFields.leafCategoryId)
+            : null;
+        return {
+            detailUrl: descFields.detailUrl ?? null,
+            attributes,
+            packageInfo,
+            title: productTitle.title ?? gallery.subject ?? '',
+            supplierName: shop.companyName ?? shop.authCompanyName ?? null,
+            sellerLoginId: feg.offerLoginId ?? feg.loginId ?? null,
+            sellerMemberId: feg.memberId ?? null,
+            sellerUserId: null,
+            saledCount: null,
+            mainImage: imgs[0] ?? null,
+            images: imgs,
+            sendArea: null,
+            province: null,
+            city: null,
+            categoryId: catId,
+        };
+    }, debug)
+        .catch(() => null);
+    if (!fromContext)
+        return scrapeDomFallback(page);
+    // Title from <title> as backup when subject empty.
+    let title = fromContext.title;
+    if (!title) {
+        const raw = await page.title();
+        title = raw.replace(/\s*-\s*阿里巴巴\s*$/, '').trim();
+    }
+    return { ...fromContext, title };
+}
+async function scrapeDomFallback(page) {
+    const raw = await page.title();
+    const title = raw.replace(/\s*-\s*阿里巴巴\s*$/, '').trim();
+    const info = await page.evaluate(() => {
+        function txt(sel) {
+            const e = document.querySelector(sel);
+            return e?.textContent?.trim() ?? null;
+        }
+        function imgSrc(sel) {
+            const e = document.querySelector(sel);
+            return e?.src ?? e?.getAttribute('data-src') ?? null;
+        }
+        return {
+            supplierName: txt('h1') ?? null,
+            mainImage: imgSrc('.v-image-wrap img') ??
+                imgSrc('.ant-image-img') ??
+                imgSrc('img[alt*="主图"]'),
+        };
+    });
+    return {
+        title,
+        supplierName: info.supplierName,
+        sellerLoginId: null,
+        sellerMemberId: null,
+        sellerUserId: null,
+        saledCount: null,
+        mainImage: info.mainImage,
+        images: info.mainImage ? [info.mainImage] : [],
+        sendArea: null,
+        province: null,
+        city: null,
+        categoryId: null,
+        detailUrl: null,
+        attributes: [],
+        packageInfo: [],
+    };
+}
+function assemble(offerId, url, sku, info) {
+    const priceRange = sku?.skuPriceScale ?? null;
+    const { min: priceMin, max: priceMax } = parseRange(priceRange);
+    const options = (sku?.skuProps ?? []).map((p) => ({
+        prop: p.prop ?? '',
+        values: (p.value ?? []).map((v) => ({
+            name: v.name ?? '',
+            imageUrl: v.imageUrl ?? null,
+        })),
+    }));
+    // Build a map: option value name → image (e.g. "22管径长方头" → cbu URL).
+    // Used to derive a per-SKU image since the SKU itself doesn't carry one.
+    const valueImage = new Map();
+    for (const opt of options) {
+        for (const v of opt.values) {
+            if (v.imageUrl)
+                valueImage.set(v.name, v.imageUrl);
+        }
+    }
+    // SKU specs is HTML-encoded ("&gt;" = ">"). Split by either, take first part.
+    // Falls back to the offer's main image when the seller didn't upload
+    // per-spec thumbnails — keeps every SKU with a usable preview URL.
+    const fallbackSkuImage = info.mainImage ?? options[0]?.values[0]?.imageUrl ?? null;
+    function deriveSkuImage(spec) {
+        const firstPart = spec.split(/&gt;|>/)[0]?.trim() ?? '';
+        return valueImage.get(firstPart) ?? fallbackSkuImage;
+    }
+    const skus = Object.entries(sku?.skuInfoMap ?? {}).map(([k, v]) => {
+        const specs = v.specAttrs ?? k;
+        return {
+            skuId: v.skuId ?? '',
+            specs,
+            price: parseFloatOrNull(v.discountPrice ?? v.price),
+            multiPrice: parseFloatOrNull(v.multiPrice),
+            stock: parseIntOrNull(v.canBookCount),
+            saleCount: typeof v.saleCount === 'number'
+                ? v.saleCount
+                : parseIntOrNull(v.saleCount) ?? 0,
+            image: deriveSkuImage(specs),
+        };
+    });
+    const freight = {
+        receiveAddress: sku?.extraInfo?.freightInfo?.receiveAddress ?? null,
+        sendArea: info.sendArea,
+        province: info.province,
+        city: info.city,
+        unitWeight: sku?.extraInfo?.freightInfo?.unitWeight ?? null,
+    };
+    const fallbackImage = info.mainImage ?? options[0]?.values[0]?.imageUrl ?? null;
+    const trade = sku?.skuSelectorModel?.tradeModel;
+    const priceTiers = (trade?.offerPriceModel?.currentPrices ?? [])
+        .map((t) => ({
+        minQty: parseIntOrNull(String(t.beginAmount ?? '')) ?? 0,
+        price: parseFloatOrNull(String(t.price ?? '')) ?? 0,
+    }))
+        .filter((t) => t.minQty > 0 && t.price > 0);
+    const tradeSaleCount = typeof trade?.saleCount === 'number'
+        ? trade.saleCount
+        : parseIntOrNull(trade?.saleCount);
+    return {
+        offerId,
+        title: info.title,
+        url,
+        priceRange,
+        priceMin,
+        priceMax,
+        unitName: trade?.unit ?? null,
+        minOrderQty: parseIntOrNull(String(trade?.beginAmount ?? '')),
+        mixOrderQty: parseIntOrNull(String(trade?.mixModel?.mixAmount ?? '')),
+        priceTiers,
+        detailUrl: info.detailUrl,
+        attributes: info.attributes,
+        packageInfo: info.packageInfo,
+        supplier: {
+            name: info.supplierName,
+            loginId: info.sellerLoginId,
+            memberId: info.sellerMemberId,
+            // sellerUserId is exposed via SKU mtop freightInfo; window.context omits it.
+            userId: info.sellerUserId ??
+                (sku?.extraInfo?.freightInfo?.sellerUserId != null
+                    ? String(sku.extraInfo.freightInfo.sellerUserId)
+                    : null),
+        },
+        freight,
+        saledCount: tradeSaleCount ??
+            info.saledCount ??
+            (skus.length > 0
+                ? skus.reduce((s, x) => s + (x.saleCount || 0), 0)
+                : null),
+        categoryId: info.categoryId,
+        options,
+        skus,
+        mainImage: fallbackImage,
+        images: info.images,
+    };
+}
+function parseRange(s) {
+    if (!s)
+        return { min: null, max: null };
+    const matches = Array.from(s.matchAll(/([\d.]+)/g)).map((m) => parseFloat(m[1]));
+    if (matches.length === 0)
+        return { min: null, max: null };
+    return {
+        min: matches[0] ?? null,
+        max: matches.length > 1 ? matches[1] : matches[0],
+    };
+}
+function parseFloatOrNull(s) {
+    if (s === undefined)
+        return null;
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+}
+function parseIntOrNull(s) {
+    if (s === undefined)
+        return null;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? n : null;
+}
+export async function run(opts) {
+    // Normalise: single offerId or batch offerIds.
+    const ids = opts.offerIds?.length
+        ? opts.offerIds
+        : opts.offerId
+            ? [opts.offerId]
+            : [];
+    if (ids.length === 0) {
+        throw new CliError(2, 'BAD_INPUT', 'offerId required.');
+    }
+    // Single ID — original behaviour, original JSON shape.
+    if (ids.length === 1) {
+        const data = await dispatch('offer', { offerId: ids[0], headed: opts.headed }, { headed: opts.headed, profile: opts.profile, noDaemon: opts.pro === true });
+        emit({
+            human: () => printOffer(data),
+            data,
+        });
+        return;
+    }
+    // Batch mode — multiple IDs, serial collection, partial results.
+    const offers = [];
+    const failures = [];
+    for (let i = 0; i < ids.length; i++) {
+        const offerId = ids[i];
+        if (!/^\d+$/.test(offerId)) {
+            failures.push({ offerId, code: 'BAD_INPUT', message: 'Invalid offerId' });
+            continue;
+        }
+        process.stderr.write(`[${i + 1}/${ids.length}] collecting offerId ${offerId}\n`);
+        try {
+            const data = await dispatch('offer', { offerId, headed: opts.headed }, { headed: opts.headed, profile: opts.profile, noDaemon: opts.pro === true });
+            offers.push(data);
+        }
+        catch (error) {
+            const err = error;
+            const message = sanitiseFailMessage(err.message || String(error));
+            failures.push({
+                offerId,
+                code: err.code || 'DEEP_COLLECT_FAILED',
+                message,
+            });
+        }
+    }
+    const result = {
+        mode: 'batch',
+        total: ids.length,
+        success: offers.length,
+        failed: failures.length,
+        offerIds: ids,
+        offers,
+        failures,
+    };
+    emit({
+        human: () => printBatch(result),
+        data: result,
+    });
+}
+function printOffer(o) {
+    process.stdout.write(`${o.title}\n`);
+    process.stdout.write(`  offerId:  ${o.offerId}\n`);
+    if (o.priceRange) {
+        process.stdout.write(`  price:    ${o.priceRange}\n`);
+    }
+    else if (o.priceMin !== null) {
+        const range = o.priceMax !== null && o.priceMax !== o.priceMin
+            ? `¥${o.priceMin.toFixed(2)} - ¥${o.priceMax.toFixed(2)}`
+            : `¥${o.priceMin.toFixed(2)}`;
+        process.stdout.write(`  price:    ${range}\n`);
+    }
+    if (o.supplier.name) {
+        process.stdout.write(`  supplier: ${o.supplier.name}\n`);
+    }
+    if (o.freight.receiveAddress) {
+        process.stdout.write(`  freight:  to ${o.freight.receiveAddress}` +
+            (o.freight.unitWeight ? `, ${o.freight.unitWeight}kg/unit` : '') +
+            '\n');
+    }
+    process.stdout.write(`  url:      ${o.url}\n`);
+    if (o.options.length) {
+        process.stdout.write(`\nOptions (${o.options.length}):\n`);
+        for (const opt of o.options) {
+            process.stdout.write(`  ${opt.prop}: ${opt.values.map((v) => v.name).slice(0, 5).join(' | ')}`);
+            if (opt.values.length > 5)
+                process.stdout.write(` ... (+${opt.values.length - 5})`);
+            process.stdout.write('\n');
+        }
+    }
+    if (o.skus.length) {
+        const sample = o.skus.slice(0, 5);
+        process.stdout.write(`\nSKUs (${o.skus.length} total, showing ${sample.length}):\n`);
+        for (const s of sample) {
+            const price = s.price !== null ? `¥${s.price.toFixed(2)}` : '?';
+            const stock = s.stock !== null ? `${s.stock} in stock` : '';
+            process.stdout.write(`  ${price.padEnd(10)} ${stock.padEnd(15)} ${s.specs}\n`);
+        }
+    }
+}
+function printBatch(result) {
+    process.stdout.write(`Batch offer results: ${result.success}/${result.total} ok` +
+        (result.failed ? `, ${result.failed} failed` : '') +
+        '\n\n');
+    for (const o of result.offers) {
+        process.stdout.write(`${o.offerId} | ${(o.title || '').slice(0, 80)}\n` +
+            `  SKUs: ${o.skus.length} | packages: ${o.packageInfo.length}` +
+            (o.priceRange ? ` | price: ${o.priceRange}` : '') +
+            '\n\n');
+    }
+    if (result.failures.length > 0) {
+        process.stdout.write('Failures:\n');
+        for (const f of result.failures) {
+            process.stdout.write(`  ${f.offerId}  ${f.code}  ${f.message}\n`);
+        }
+    }
+}
+/** Strip long risk-control URLs from error messages. */
+function sanitiseFailMessage(message) {
+    if (/x5secdata|punish|captcha|verify|nocaptcha/i.test(message)) {
+        return '1688 触发滑块验证，请使用 --headed 手动处理。';
+    }
+    return message;
+}
+//# sourceMappingURL=offer.js.map

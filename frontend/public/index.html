@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工业标准品多平台询价与供应商比价系统</title>
+    <style>
+        :root {
+            --primary: #1e40af;
+            --primary-hover: #1d4ed8;
+            --bg-slate: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --badge-exact-bg: #dcfce7;
+            --badge-exact-txt: #166534;
+            --badge-replace-bg: #fee2e2;
+            --badge-replace-txt: #991b1b;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        body { background-color: var(--bg-slate); color: var(--text-main); padding: 24px; }
+        
+        .container { max-width: 1280px; margin: 0 auto; }
+        
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 2px solid var(--border); }
+        .header h1 { font-size: 22px; font-weight: 700; color: var(--primary); }
+        .header .actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; }
+        .header .status-tag { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; background: #e0f2fe; color: #0369a1; border-radius: 20px; font-size: 13px; font-weight: 600; }
+        .status-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; }
+
+        .toast { display: none; position: fixed; top: 20px; right: 20px; background: #0f172a; color: white; padding: 12px 20px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-size: 14px; z-index: 9999; }
+
+        .search-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 24px; }
+        .form-grid { display: grid; grid-template-columns: 2fr 3fr 1.5fr auto; gap: 16px; align-items: end; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-group label { font-size: 13px; font-weight: 600; color: var(--text-muted); }
+        .form-control { padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; outline: none; transition: border-color 0.2s; }
+        .form-control:focus { border-color: var(--primary); }
+
+        .btn { padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; display: inline-flex; align-items: center; gap: 8px; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-login { background: #ea580c; color: white; font-size: 13px; padding: 6px 14px; border-radius: 20px; }
+        .btn-login:hover { background: #c2410c; }
+        .btn-excel { background: #166534; color: white; margin-left: 12px; }
+        .btn-excel:hover { background: #15803d; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .platform-checks { display: flex; gap: 16px; margin-top: 12px; font-size: 13px; color: var(--text-muted); }
+        .platform-checks label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+        .section-title { font-size: 16px; font-weight: 700; margin: 24px 0 12px 0; display: flex; align-items: center; justify-content: space-between; }
+        
+        .results-table { width: 100%; border-collapse: collapse; background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 24px; }
+        .results-table th { background: #f1f5f9; padding: 12px; text-align: left; font-size: 12px; font-weight: 700; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+        .results-table td { padding: 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+        .results-table tr:hover { background-color: #f8fafc; }
+
+        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 700; }
+        .badge-exact { background: var(--badge-exact-bg); color: var(--badge-exact-txt); }
+        .badge-replace { background: var(--badge-replace-bg); color: var(--badge-replace-txt); }
+        
+        .price-text { font-weight: 700; color: #b91c1c; font-size: 15px; }
+        .link-text { color: var(--primary); text-decoration: none; font-weight: 600; }
+        .link-text:hover { text-decoration: underline; }
+
+        .loading { display: none; text-align: center; padding: 30px; color: var(--primary); font-weight: 600; }
+        .tier-price-box { font-size: 11px; color: #475569; background: #f8fafc; padding: 4px 8px; border-radius: 4px; margin-top: 4px; }
+        .store-type { display: inline-block; margin-top: 4px; padding: 2px 7px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 11px; font-weight: 700; }
+        .sku-confirmed { margin-top: 4px; color: #047857; font-size: 11px; }
+        .result-notice { display: none; margin-bottom: 16px; padding: 12px 16px; border: 1px solid #f59e0b; border-radius: 8px; background: #fffbeb; color: #92400e; font-size: 13px; }
+        .query-mode-switch { display: flex; gap: 8px; margin-bottom: 16px; }
+        .query-mode-switch label { cursor: pointer; padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: 13px; font-weight: 600; }
+        .query-mode-switch label:has(input:checked) { border-color: var(--primary); background: #eff6ff; color: var(--primary); }
+        .sort-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 0 12px; color: var(--text-muted); font-size: 12px; }
+        .sort-toolbar select { padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text-main); }
+        .result-policy { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); }
+        .result-policy select, .result-policy input { padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+        .result-policy input { width: 64px; }
+        .platform-status-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; margin-bottom: 14px; }
+        .platform-status-item { padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: #f8fafc; font-size: 12px; }
+        .platform-status-item.has-error { border-color: #f59e0b; background: #fffbeb; }
+        .platform-status-item small { display: block; margin-top: 4px; color: #92400e; }
+    </style>
+</head>
+<body>
+    <div id="toastBox" class="toast"></div>
+
+    <div class="container">
+        <div class="header">
+            <h1>工业标准品多平台询价与供应商比价系统</h1>
+            <div class="actions">
+                <button class="btn btn-login" onclick="triggerLogin('1688')">🔑 登录 1688 保持登录态</button>
+                <button class="btn btn-login" onclick="triggerLogin('taobao')">🔑 登录 淘宝/天猫</button>
+                <button class="btn btn-login" onclick="triggerLogin('jd')">🔑 登录 京东</button>
+                <button class="btn btn-login" onclick="triggerLogin('misumi')">🔑 登录 米思米</button>
+                <div class="status-tag">
+                    <span class="status-dot"></span>
+                    <span id="systemStatusText">系统就绪 | 平台: 1688、淘宝/天猫、京东、米思米</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="search-card">
+            <div class="query-mode-switch">
+                <label><input type="radio" name="queryMode" value="model" checked onchange="toggleQueryMode()"> 工业品牌 + 完整型号</label>
+                <label><input type="radio" name="queryMode" value="keyword" onchange="toggleQueryMode()"> 关键词搜索</label>
+            </div>
+            <div class="form-grid">
+                <div id="modelFields" style="display: contents;">
+                    <div class="form-group">
+                        <label>工业品牌</label>
+                        <input type="text" id="brandInput" class="form-control" placeholder="例如: SKF, SMC, 欧姆龙" value="SKF">
+                    </div>
+                    <div class="form-group">
+                        <label>完整型号 (包含前缀后缀与规格)</label>
+                        <input type="text" id="modelInput" class="form-control" placeholder="例如: 6205-2Z/C3, CDQ2B32-50DMZ" value="6205-2Z/C3">
+                    </div>
+                </div>
+                <div id="keywordFields" class="form-group" style="display: none; grid-column: span 2;">
+                    <label>商品关键词</label>
+                    <input type="text" id="keywordInput" class="form-control" placeholder="例如: SKF 轴承、无线蓝牙耳机、工业传感器">
+                </div>
+                <div class="form-group">
+                    <label>采购数量</label>
+                    <input type="number" id="qtyInput" class="form-control" value="10" min="1">
+                </div>
+                <div>
+                    <button class="btn btn-primary" id="searchBtn" onclick="doSearch()">
+                        🔍 开始比价
+                    </button>
+                </div>
+            </div>
+            <div class="platform-checks">
+                <span>查询平台：</span>
+                <label><input type="checkbox" class="platform-check" value="1688" checked> 1688</label>
+                <label><input type="checkbox" class="platform-check" value="taobao" checked> 淘宝/天猫</label>
+                <label><input type="checkbox" class="platform-check" value="jd"> 京东</label>
+                <label><input type="checkbox" class="platform-check" value="misumi"> 米思米中国</label>
+                <label style="margin-left: 20px; color: #0284c7;">
+                    <input type="checkbox" id="forceMockCheck"> 强制 Mock 测试模式
+                </label>
+            </div>
+            <div class="result-policy">
+                <span>候选范围：</span>
+                <select id="resultMode" onchange="updateResultPolicyLabel()">
+                    <option value="per_platform">每个平台各取</option>
+                    <option value="global">全平台按置信度取前</option>
+                </select>
+                <input type="number" id="resultLimit" value="10" min="1" max="50">
+                <span id="resultPolicyUnit">条 / 平台</span>
+            </div>
+        </div>
+
+        <div id="loadingBox" class="loading">
+            <h2>⏳ 正在检索商品并解析目标 SKU 价格...</h2>
+        </div>
+
+        <div id="resultsContainer" style="display: none;">
+            <div id="resultNotice" class="result-notice"></div>
+            <div id="platformStatusList" class="platform-status-list"></div>
+            <div class="sort-toolbar">
+                <span>结果排序：</span>
+                <select id="sortField" onchange="rerenderSortedResults()">
+                    <option value="confidence">置信分</option>
+                    <option value="platform">平台</option>
+                    <option value="price">价格</option>
+                </select>
+                <select id="sortDirection" onchange="rerenderSortedResults()">
+                    <option value="desc">降序</option>
+                    <option value="asc">升序</option>
+                </select>
+            </div>
+            <div class="section-title">
+                <span id="primarySectionTitle">精确与高效匹配报价 (EXACT / HIGH)</span>
+                <div>
+                    <button class="btn btn-excel" id="exportBtn" onclick="exportExcel()">
+                        📥 导出询价比价 Excel
+                    </button>
+                </div>
+            </div>
+            <table class="results-table">
+                <thead>
+                    <tr>
+                        <th>匹配等级</th>
+                        <th>置信分</th>
+                        <th>平台</th>
+                        <th>商品标题与规格</th>
+                        <th>供应商/店铺</th>
+                        <th>起订量</th>
+                        <th>询价单价</th>
+                        <th>含税/包邮</th>
+                        <th>交期</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="exactTableBody"></tbody>
+            </table>
+
+            <div class="section-title" style="color: #991b1b;">
+                <span id="secondarySectionTitle">待确认 / 替代品 / 其他结果</span>
+            </div>
+            <table class="results-table">
+                <thead>
+                    <tr>
+                        <th>匹配等级</th>
+                        <th>置信分</th>
+                        <th>平台</th>
+                        <th>商品标题与规格</th>
+                        <th>差异与风险提示</th>
+                        <th>询价单价</th>
+                        <th>供应商</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="replacementTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let currentHistoryId = null;
+        let currentResultData = null;
+        let resolvedApiBase = window.location.protocol === 'file:' ? null : '';
+
+        async function resolveApiBase() {
+            if(resolvedApiBase !== null) return resolvedApiBase;
+
+            // run_server.py 会从 8000 开始寻找空闲端口。直接双击 HTML 时，
+            // 自动寻找真正运行中的 bijia 后端，避免请求落到旧端口。
+            for(let port = 8000; port < 8020; port++) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 350);
+                try {
+                    const base = `http://127.0.0.1:${port}`;
+                    const response = await fetch(`${base}/api/health`, { signal: controller.signal });
+                    if(response.ok) {
+                        const health = await response.json();
+                        if(health.service === 'bijia-backend') {
+                            resolvedApiBase = base;
+                            return base;
+                        }
+                    }
+                } catch (_) {
+                    // 继续检查下一个候选端口。
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            }
+            throw new Error('未找到比价后端服务，请先双击 start.bat 启动项目');
+        }
+
+        async function apiFetch(path, options) {
+            const base = await resolveApiBase();
+            return fetch(`${base}${path}`, options);
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toastBox');
+            toast.innerText = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        function safeProductUrl(value) {
+            try {
+                const url = new URL(String(value || ''), window.location.origin);
+                return ['http:', 'https:'].includes(url.protocol) ? escapeHtml(url.href) : '#';
+            } catch (_) {
+                return '#';
+            }
+        }
+
+        function formatPrice(value) {
+            const number = Number(value);
+            return Number.isFinite(number) ? number.toFixed(2) : '--';
+        }
+
+        function getQueryMode() {
+            return document.querySelector('input[name="queryMode"]:checked')?.value || 'model';
+        }
+
+        function toggleQueryMode() {
+            const keywordMode = getQueryMode() === 'keyword';
+            document.getElementById('modelFields').style.display = keywordMode ? 'none' : 'contents';
+            document.getElementById('keywordFields').style.display = keywordMode ? 'block' : 'none';
+            document.getElementById('searchBtn').innerText = keywordMode ? '🔍 搜索商品' : '🔍 开始比价';
+        }
+
+        function updateResultPolicyLabel() {
+            const globalMode = document.getElementById('resultMode').value === 'global';
+            document.getElementById('resultPolicyUnit').textContent = globalMode ? '条（总计）' : '条 / 平台';
+            if(globalMode && Number(document.getElementById('resultLimit').value) === 10) {
+                document.getElementById('resultLimit').value = 20;
+            }
+        }
+
+        async function triggerLogin(platform) {
+            showToast(`🚀 已向系统发送指令，正在桌面强制弹出 [${platform}] 登录浏览器窗口...`);
+            try {
+                const resp = await apiFetch(`/api/auth/login/${platform}`, { method: 'POST' });
+                const res = await resp.json();
+                if(!resp.ok) throw new Error(res.detail || `HTTP ${resp.status}`);
+                if(res.status === 'launched') {
+                    showToast(`✅ [${platform}] 独立登录窗口已在桌面打开，请在窗口中扫码登录！`);
+                }
+            } catch(e) {
+                console.error(e);
+                showToast(`❌ 弹出登录窗口失败: ${e.message}`);
+            }
+        }
+
+        async function doSearch() {
+            const queryMode = getQueryMode();
+            const brand = document.getElementById('brandInput').value.trim();
+            const model = document.getElementById('modelInput').value.trim();
+            const keyword = document.getElementById('keywordInput').value.trim();
+            const qty = parseInt(document.getElementById('qtyInput').value) || 1;
+            const forceMock = document.getElementById('forceMockCheck').checked;
+            const resultMode = document.getElementById('resultMode').value;
+            const resultLimit = Math.min(50, Math.max(1, parseInt(document.getElementById('resultLimit').value) || 10));
+            const platforms = Array.from(document.querySelectorAll('.platform-check:checked'))
+                .map(input => input.value);
+
+            if(queryMode === 'model' && (!brand || !model)) {
+                alert('请填写品牌和完整型号！');
+                return;
+            }
+            if(queryMode === 'keyword' && !keyword) {
+                alert('请填写商品关键词！');
+                return;
+            }
+            if(platforms.length === 0) {
+                alert('请至少选择一个查询平台！');
+                return;
+            }
+
+            const searchBtn = document.getElementById('searchBtn');
+            searchBtn.disabled = true;
+            searchBtn.innerText = '🔍 实时查询中...';
+            document.getElementById('loadingBox').style.display = 'block';
+            document.querySelector('#loadingBox h2').innerText = queryMode === 'keyword'
+                ? '⏳ 正在按关键词检索多个平台...'
+                : '⏳ 正在检索商品并解析目标 SKU 价格...';
+            document.getElementById('resultsContainer').style.display = 'none';
+
+            const controller = new AbortController();
+            // 淘宝/天猫需进入商品详情确认店铺和目标 SKU，给真实查询留足时间。
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+            try {
+                const resp = await apiFetch('/api/inquire', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query_mode: queryMode, brand, model, keyword, quantity: qty, platforms, force_mock: forceMock, result_mode: resultMode, result_limit: resultLimit }),
+                    signal: controller.signal
+                });
+
+                const data = await resp.json();
+                if(!resp.ok) {
+                    const detail = Array.isArray(data.detail)
+                        ? data.detail.map(item => item.msg).join('；')
+                        : (data.detail || `HTTP ${resp.status}`);
+                    throw new Error(detail);
+                }
+                currentHistoryId = data.history_id;
+                renderResults(data);
+            } catch(e) {
+                console.error(e);
+                const message = e.name === 'AbortError'
+                    ? '查询超过 120 秒，已取消。请检查所选平台登录状态后再试。'
+                    : `查询失败：${e.message}`;
+                showToast(`❌ ${message}`);
+            } finally {
+                clearTimeout(timeoutId);
+                searchBtn.disabled = false;
+                searchBtn.innerText = queryMode === 'keyword' ? '🔍 搜索商品' : '🔍 开始比价';
+                document.getElementById('loadingBox').style.display = 'none';
+            }
+        }
+
+        function renderResults(data) {
+            currentResultData = data;
+            document.getElementById('resultsContainer').style.display = 'block';
+            
+            const exactBody = document.getElementById('exactTableBody');
+            const replaceBody = document.getElementById('replacementTableBody');
+            exactBody.innerHTML = '';
+            replaceBody.innerHTML = '';
+
+            const notice = document.getElementById('resultNotice');
+            const statusText = document.getElementById('systemStatusText');
+            const keywordMode = data.query_mode === 'keyword';
+            document.getElementById('primarySectionTitle').textContent = keywordMode
+                ? '关键词高相关商品 (HIGH)'
+                : '精确与高效匹配报价 (EXACT / HIGH)';
+            document.getElementById('secondarySectionTitle').textContent = keywordMode
+                ? '部分相关 / 低相关商品'
+                : '待确认 / 替代品 / 其他结果';
+            if(data.warning) {
+                notice.textContent = `⚠ ${data.warning}${data.error_code ? `（${data.error_code}）` : ''}`;
+                notice.style.display = 'block';
+            } else {
+                notice.textContent = '';
+                notice.style.display = 'none';
+            }
+            const sourceLabels = {
+                LIVE_CLI: '实时',
+                LIVE_BROWSER: '实时',
+                LIVE_MTOP: '实时',
+                LIVE_MTOP_DETAIL: '实时（详情已核验）',
+                LIVE_JD_SEARCH: '实时搜索',
+                LIVE_JD_DETAIL: '实时（详情已核验）',
+                LIVE_MISUMI_BROWSER: '实时目录',
+                MOCK: '离线测试',
+                MOCK_FALLBACK: '离线兜底',
+                NONE: '无数据'
+            };
+            const platformLabels = { '1688': '1688', taobao: '淘宝/天猫', jd: '京东', misumi: '米思米中国' };
+            const platformStatuses = data.platform_statuses || {};
+            const statusParts = Object.entries(platformStatuses).map(([platform, status]) =>
+                `${platformLabels[platform] || platform}: ${status.selected_count ?? status.result_count ?? 0}/${status.raw_result_count ?? status.result_count ?? 0}条`
+            );
+            statusText.textContent = `系统就绪 | ${statusParts.join(' · ') || sourceLabels[data.data_source] || '未获取数据'}`;
+            const platformStatusList = document.getElementById('platformStatusList');
+            platformStatusList.innerHTML = Object.entries(platformStatuses).map(([platform, status]) => {
+                const source = sourceLabels[status.data_source] || status.data_source || '无数据';
+                const rawCount = status.raw_result_count ?? status.result_count ?? 0;
+                const selectedCount = status.selected_count ?? status.result_count ?? 0;
+                const error = status.error_message
+                    ? `<small>${escapeHtml(status.error_message)}${status.error_code ? `（${escapeHtml(status.error_code)}）` : ''}</small>`
+                    : '';
+                return `<div class="platform-status-item ${error ? 'has-error' : ''}">
+                    <b>${escapeHtml(platformLabels[platform] || platform)}</b> · ${escapeHtml(source)} · 入选 ${selectedCount}/${rawCount} 条
+                    ${error}
+                </div>`;
+            }).join('');
+
+            const exacts = sortResultItems(data.exact_matches || []);
+            if(exacts.length === 0) {
+                exactBody.innerHTML = `<tr><td colspan="10" style="text-align:center; color:#94a3b8;">未找到完全精确匹配的结果</td></tr>`;
+            } else {
+                exacts.forEach(item => {
+                    exactBody.appendChild(createRow(item, 'exact'));
+                });
+            }
+
+            const replacements = sortResultItems([
+                ...(data.possible_matches || []),
+                ...(data.replacement_matches || []),
+                ...(data.other_matches || [])
+            ]);
+            if(replacements.length === 0) {
+                replaceBody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:#94a3b8;">未找到替代品或待确认项</td></tr>`;
+            } else {
+                replacements.forEach(item => {
+                    replaceBody.appendChild(createRow(item, 'replace'));
+                });
+            }
+        }
+
+        function sortResultItems(items) {
+            const field = document.getElementById('sortField')?.value || 'confidence';
+            const direction = document.getElementById('sortDirection')?.value === 'asc' ? 1 : -1;
+            const platformOrder = { '1688': 1, taobao: 2, jd: 3, misumi: 4 };
+            return items.map((item, index) => ({ item, index })).sort((left, right) => {
+                let comparison = 0;
+                if(field === 'platform') {
+                    comparison = (platformOrder[left.item.platform] || 99) - (platformOrder[right.item.platform] || 99);
+                } else if(field === 'price') {
+                    comparison = Number(left.item.unit_price || 0) - Number(right.item.unit_price || 0);
+                } else {
+                    comparison = Number(left.item.match_score || 0) - Number(right.item.match_score || 0);
+                }
+                return comparison === 0 ? left.index - right.index : comparison * direction;
+            }).map(entry => entry.item);
+        }
+
+        function rerenderSortedResults() {
+            if(currentResultData) renderResults(currentResultData);
+        }
+
+        function createRow(item, type) {
+            const tr = document.createElement('tr');
+            
+            let tierHtml = '';
+            if(item.tier_prices && item.tier_prices.length > 0) {
+                const tierStrs = item.tier_prices.map(t => `${escapeHtml(t.min_quantity)}+件: ¥${formatPrice(t.unit_price)}`);
+                tierHtml = `<div class="tier-price-box">阶梯价: ${tierStrs.join(' | ')}</div>`;
+            }
+            const skuHtml = item.sku_name
+                ? `<div class="sku-confirmed">✓ 已确认目标SKU：${escapeHtml(item.sku_name)}</div>`
+                : '';
+            const yearsHtml = item.supplier_years != null
+                ? ` · ${escapeHtml(item.supplier_years)}年`
+                : '';
+            const storeHtml = `<span class="store-type">${escapeHtml(item.supplier_type || '类型待确认')}${yearsHtml}</span>`;
+            const platformName = { '1688': '1688', taobao: '淘宝/天猫', jd: '京东', misumi: '米思米中国' }[item.platform] || item.platform;
+
+            if(type === 'exact') {
+                tr.innerHTML = `
+                    <td><span class="badge badge-exact">${escapeHtml(item.match_level)}</span></td>
+                    <td><b>${escapeHtml(item.match_score)}</b></td>
+                    <td>${escapeHtml(platformName)}</td>
+                    <td>
+                        <b>${escapeHtml(item.title)}</b>
+                        ${skuHtml}
+                        ${tierHtml}
+                    </td>
+                    <td>${escapeHtml(item.supplier_name)}<br>${storeHtml}</td>
+                    <td>${escapeHtml(item.min_order_quantity)}</td>
+                    <td><span class="price-text">¥${formatPrice(item.unit_price)}</span></td>
+                    <td>${item.tax_included === true ? '含税' : (item.tax_included === false ? '未税' : '未知')}</td>
+                    <td>${escapeHtml(item.delivery_time || '未知')}</td>
+                    <td><a href="${safeProductUrl(item.product_url)}" target="_blank" rel="noopener noreferrer" class="link-text">查看商品 ↗</a></td>
+                `;
+            } else {
+                const reasons = (item.mismatch_reasons || []).join('；') || '需人工确认规格';
+                tr.innerHTML = `
+                    <td><span class="badge badge-replace">${escapeHtml(item.match_level)}</span></td>
+                    <td><b>${escapeHtml(item.match_score)}</b></td>
+                    <td>${escapeHtml(platformName)}</td>
+                    <td><b>${escapeHtml(item.title)}</b>${skuHtml}</td>
+                    <td style="color:#b91c1c; font-size:12px;">${escapeHtml(reasons)}</td>
+                    <td><span class="price-text">¥${formatPrice(item.unit_price)}</span></td>
+                    <td>${escapeHtml(item.supplier_name)}<br>${storeHtml}</td>
+                    <td><a href="${safeProductUrl(item.product_url)}" target="_blank" rel="noopener noreferrer" class="link-text">查看商品 ↗</a></td>
+                `;
+            }
+            return tr;
+        }
+
+        async function exportExcel() {
+            if(!currentHistoryId) return;
+            try {
+                const base = await resolveApiBase();
+                window.location.href = `${base}/api/export/${currentHistoryId}`;
+            } catch(e) {
+                showToast(`❌ 导出失败: ${e.message}`);
+            }
+        }
+    </script>
+</body>
+</html>
