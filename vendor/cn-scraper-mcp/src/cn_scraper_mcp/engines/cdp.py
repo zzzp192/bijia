@@ -370,24 +370,31 @@ def find_chrome() -> str | None:
     import sys as _sys
 
     # 1. Environment variable override
-    for env_var in ("CHROME_BIN", "CHROME_PATH"):
+    for env_var in ("CHROME_BIN", "CHROME_PATH", "EDGE_PATH", "BROWSER_PATH"):
         env_path = _os.environ.get(env_var)
         if env_path and _os.path.isfile(env_path):
             return env_path
 
-    # 2. PATH lookup (covers Docker, Linux packages, Homebrew)
+    # 2. PATH lookup (covers Docker, Linux packages, Homebrew, Edge)
     for candidate in ("chromium", "google-chrome", "google-chrome-stable",
-                       "chrome", "chromium-browser"):
+                       "chrome", "msedge", "chromium-browser"):
         found = shutil.which(candidate)
         if found:
             return found
 
     # 3. Platform-specific hardcoded paths
+    local_app_data = _os.environ.get("LOCALAPPDATA", "").replace("\\", "/")
     patterns: list[str] = []
     if _sys.platform == "win32":
         patterns = [
             "C:/Program Files/Google/Chrome/Application/chrome.exe",
             "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+            f"{local_app_data}/Google/Chrome/Application/chrome.exe",
+            "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+            "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+            f"{local_app_data}/Microsoft/Edge/Application/msedge.exe",
+            f"{local_app_data}/EFMAT/Bijia/runtime/browser/chrome.exe",
+            f"{local_app_data}/EFMAT/Bijia/runtime/browser/chrome-win64/chrome.exe",
             str(Path.home() / ".agent-browser/browsers/chrome-*/chrome.exe"),
         ]
     elif _sys.platform == "darwin":

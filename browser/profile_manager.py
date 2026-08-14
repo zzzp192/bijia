@@ -1,13 +1,39 @@
 import os
+import glob
 import json
+import shutil
 import subprocess
 import sys
 import time
 from typing import Optional
 
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-PROFILES_DIR = os.path.join(BASE_DIR, "browser_profiles")
-COOKIES_DIR = os.path.join(BASE_DIR, "cookies")
+def get_base_dir() -> str:
+    override = os.getenv("BIJIA_APP_ROOT")
+    if override:
+        return os.path.abspath(override)
+    return os.path.dirname(os.path.dirname(__file__))
+
+def get_profiles_dir() -> str:
+    override = os.getenv("BIJIA_PROFILES_DIR")
+    if override:
+        return os.path.abspath(override)
+    data_dir = os.getenv("BIJIA_DATA_DIR")
+    if data_dir:
+        return os.path.join(os.path.abspath(data_dir), "browser_profiles")
+    return os.path.join(get_base_dir(), "browser_profiles")
+
+def get_cookies_dir() -> str:
+    override = os.getenv("BIJIA_COOKIES_DIR")
+    if override:
+        return os.path.abspath(override)
+    data_dir = os.getenv("BIJIA_DATA_DIR")
+    if data_dir:
+        return os.path.join(os.path.abspath(data_dir), "cookies")
+    return os.path.join(get_base_dir(), "cookies")
+
+BASE_DIR = get_base_dir()
+PROFILES_DIR = get_profiles_dir()
+COOKIES_DIR = get_cookies_dir()
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
@@ -17,8 +43,54 @@ class ProfileManager:
     实现人工扫码登录与 Cookie/Session 本地持久化隔离存储
     """
     @staticmethod
+    def find_system_browser() -> Optional[str]:
+        """
+        自动探测本机已安装的 Chrome 或 Edge 浏览器，避免下载庞大的 Playwright Chromium。
+        优先级：
+        1. 环境变量 (CHROME_PATH / CHROME_BIN / EDGE_PATH / BROWSER_PATH)
+        2. Google Chrome (系统安装目录 / 用户目录)
+        3. Microsoft Edge (Windows 10/11 预装浏览器)
+        4. 应用专属运行时下载的 Chrome for Testing
+        5. PATH 查找
+        """
+        for env_k in ("CHROME_PATH", "CHROME_BIN", "EDGE_PATH", "BROWSER_PATH"):
+            v = os.environ.get(env_k)
+            if v and os.path.isfile(v):
+                return os.path.abspath(v)
+
+        prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+
+        candidates = [
+            # Google Chrome
+            os.path.join(prog_files, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(prog_files_x86, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(local_app_data, "Google", "Chrome", "Application", "chrome.exe"),
+            # Microsoft Edge (Windows 默认预装)
+            os.path.join(prog_files_x86, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(prog_files, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(local_app_data, "Microsoft", "Edge", "Application", "msedge.exe"),
+            # App-owned runtime fallback
+            os.path.join(local_app_data, "EFMAT", "Bijia", "runtime", "browser", "chrome.exe"),
+            os.path.join(local_app_data, "EFMAT", "Bijia", "runtime", "browser", "chrome-win64", "chrome.exe"),
+        ]
+
+        for c in candidates:
+            if c and os.path.isfile(c):
+                return os.path.abspath(c)
+
+        for candidate_name in ("chrome", "google-chrome", "msedge", "chromium"):
+            found = shutil.which(candidate_name)
+            if found:
+                return os.path.abspath(found)
+
+        return None
+
+    @staticmethod
     def get_profile_dir(platform: str) -> str:
-        pdir = os.path.join(PROFILES_DIR, f"{platform.lower()}_profile")
+        profiles_dir = get_profiles_dir()
+        pdir = os.path.join(profiles_dir, f"{platform.lower()}_profile")
         os.makedirs(pdir, exist_ok=True)
         return pdir
 
@@ -37,48 +109,37 @@ class ProfileManager:
                 cli_env = os.environ.copy()
                 for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                     cli_env.pop(key, None)
+                if "BB1688_HOME" not in cli_env:
+                    base_data = os.environ.get("BIJIA_DATA_DIR")
+                    if base_data:
+                        bb_home = os.path.join(os.path.dirname(os.path.abspath(base_data)), "1688")
+                        os.makedirs(bb_home, exist_ok=True)
+                        cli_env["BB1688_HOME"] = bb_home
 
-                # daemon 持有同一个 Profile 时，登录浏览器无法可靠取得锁；同时
-                # daemon 的缓存身份可能已经过期。先停 daemon，再强制进行真实
-                # headed 登录，避免命令因“缓存显示已登录”而瞬间退出。
-                print(" 正在停止旧的 1688 后台会话...")
                 subprocess.run(
                     ["node", cli_js, "daemon", "stop", "--profile", "default"],
                     cwd=upstream_1688,
                     env=cli_env,
                     shell=False,
-                    check=False,
                 )
-
-                print(" 正在打开 1688 登录浏览器（最长等待 5 分钟）...")
-                cmd = [
-                    "node", cli_js, "login",
-                    "--profile", "default",
-                    "--headed",
-                    "--force",
-                    "--timeout", "300",
-                    "--no-daemon",
-                ]
-                result = subprocess.run(
-                    cmd,
+                login_res = subprocess.run(
+                    [
+                        "node", cli_js, "login", "--profile", "default", "--headed", "--force",
+                        "--timeout", "300", "--no-daemon",
+                    ],
                     cwd=upstream_1688,
                     env=cli_env,
                     shell=False,
-                    check=False,
                 )
-                if result.returncode == 0:
-                    print(" 登录成功，正在重新启动 1688 后台会话...")
-                    daemon_result = subprocess.run(
+                if login_res.returncode == 0:
+                    subprocess.run(
                         ["node", cli_js, "daemon", "start", "--profile", "default"],
                         cwd=upstream_1688,
                         env=cli_env,
                         shell=False,
-                        check=False,
                     )
-                    if daemon_result.returncode != 0:
-                        print(" 登录态已保存，但后台会话启动失败；首次查询时会自动重试。")
                     return "SUCCESS"
-                print(f"1688-cli login 失败，退出码: {result.returncode}")
+                print(f"1688-cli login 失败，退出码: {login_res.returncode}")
                 return None
             except Exception as e:
                 print(f"1688-cli login 异常: {e}")
@@ -98,16 +159,21 @@ class ProfileManager:
         try:
             from playwright.sync_api import sync_playwright
             target_url = "https://login.1688.com/member/signin.htm" if platform.lower() == "1688" else "https://www.taobao.com"
+            browser_exe = ProfileManager.find_system_browser()
+            launch_args = {
+                "user_data_dir": pdir,
+                "headless": False,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--window-size=1200,800",
+                ]
+            }
+            if browser_exe:
+                launch_args["executable_path"] = browser_exe
+
             with sync_playwright() as p:
-                context = p.chromium.launch_persistent_context(
-                    user_data_dir=pdir,
-                    headless=False,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--window-size=1200,800",
-                    ]
-                )
+                context = p.chromium.launch_persistent_context(**launch_args)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(target_url)
                 context.wait_for_event("close", timeout=0)
@@ -119,20 +185,25 @@ class ProfileManager:
     @staticmethod
     def _launch_taobao_login(pdir: str, timeout_seconds: int = 300) -> Optional[str]:
         """打开淘宝登录页，并把当前用户自己的 Cookie 保存给 MTOP 引擎。"""
-        cookie_path = os.path.join(COOKIES_DIR, "taobao.json")
+        cookie_path = os.path.join(get_cookies_dir(), "taobao.json")
         try:
             from playwright.sync_api import sync_playwright
 
+            browser_exe = ProfileManager.find_system_browser()
+            launch_args = {
+                "user_data_dir": pdir,
+                "headless": False,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--window-size=1200,800",
+                ],
+            }
+            if browser_exe:
+                launch_args["executable_path"] = browser_exe
+
             with sync_playwright() as playwright:
-                context = playwright.chromium.launch_persistent_context(
-                    user_data_dir=pdir,
-                    headless=False,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--window-size=1200,800",
-                    ],
-                )
+                context = playwright.chromium.launch_persistent_context(**launch_args)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(
                     "https://login.taobao.com/member/login.jhtml",
@@ -148,70 +219,46 @@ class ProfileManager:
                     cookie_dict = {
                         item["name"]: item["value"]
                         for item in cookies
-                        if item.get("value") and (
-                            item.get("domain", "").endswith("taobao.com")
-                            or item.get("domain", "").endswith("tmall.com")
-                        )
+                        if item.get("name") and item.get("value")
                     }
-                    # cookie2 可能在匿名会话中出现；必须同时看到明确身份 Cookie，
-                    # 才能把本次操作判定为用户已完成登录。
-                    logged_in = bool(cookie_dict.get("cookie2")) and any(
-                        cookie_dict.get(name)
-                        for name in ("unb", "tracknick", "lgc", "_nk_")
-                    )
-                    if logged_in and not warmed_up:
-                        warmed_up = True
-                        try:
-                            page.goto(
-                                "https://h5.m.taobao.com/",
-                                wait_until="domcontentloaded",
-                                timeout=15000,
-                            )
-                        except Exception:
-                            pass
-                        time.sleep(1)
-                        continue
-                    if logged_in and warmed_up:
-                        cookies = context.cookies()
-                        cookie_dict = {
-                            item["name"]: item["value"]
-                            for item in cookies
-                            if item.get("value") and (
-                                item.get("domain", "").endswith("taobao.com")
-                                or item.get("domain", "").endswith("tmall.com")
-                            )
-                        }
+
+                    if "_m_h5_tk" in cookie_dict:
                         ProfileManager._write_cookie_file(cookie_path, cookie_dict)
-                        print(" 淘宝/天猫登录成功，登录态已保存。")
-                        context.close()
+                        print(f" 成功捕获淘宝/天猫 Cookie: {cookie_path}")
+
+                        if not warmed_up and "_m_h5_tk" in cookie_dict:
+                            try:
+                                page.goto(
+                                    "https://s.taobao.com/search?q=%E6%B5%8B%E8%AF%95",
+                                    wait_until="domcontentloaded",
+                                    timeout=10000,
+                                )
+                                warmed_up = True
+                            except Exception:
+                                pass
+
+                        print(" 登录完成，您可以关闭该浏览器窗口。")
+                        time.sleep(2)
                         return "SUCCESS"
+
                     time.sleep(1)
 
-                try:
-                    context.close()
-                except Exception:
-                    pass
-                print(" 淘宝/天猫登录未完成或已超时。")
-                return None
+                return "SUCCESS" if os.path.exists(cookie_path) else None
         except Exception as exc:
             print(f"启动淘宝登录浏览器出错: {exc}")
             return None
 
     @staticmethod
     def _launch_jd_login(pdir: str) -> Optional[str]:
-        """使用与京东查询引擎完全相同的 Chrome Profile 完成人工登录。"""
-        upstream_src = os.path.join(BASE_DIR, "vendor", "cn-scraper-mcp", "src")
-        if upstream_src not in sys.path:
-            sys.path.insert(0, upstream_src)
+        """打开京东可视化浏览器并持久化独立 Profile。"""
         try:
             from cn_scraper_mcp.engines.cdp import launch_chrome
-            from cn_scraper_mcp.engines.jd import JD_PORT
 
             process = launch_chrome(
-                JD_PORT,
-                pdir,
-                url="https://passport.jd.com/new/login.aspx",
+                port=9222,
+                user_data_dir=pdir,
                 headless=False,
+                url="https://passport.jd.com/new/login.aspx",
             )
             if process is None:
                 print("京东登录浏览器未能启动。")
@@ -230,17 +277,22 @@ class ProfileManager:
         try:
             from playwright.sync_api import sync_playwright
 
+            browser_exe = ProfileManager.find_system_browser()
+            launch_args = {
+                "user_data_dir": pdir,
+                "headless": False,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--no-proxy-server",
+                    "--window-size=1280,900",
+                ],
+            }
+            if browser_exe:
+                launch_args["executable_path"] = browser_exe
+
             with sync_playwright() as playwright:
-                context = playwright.chromium.launch_persistent_context(
-                    user_data_dir=pdir,
-                    headless=False,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--no-proxy-server",
-                        "--window-size=1280,900",
-                    ],
-                )
+                context = playwright.chromium.launch_persistent_context(**launch_args)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(
                     "https://www.misumi.com.cn/",

@@ -73,6 +73,12 @@ class Alibaba1688Adapter:
                 cli_env = os.environ.copy()
                 for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                     cli_env.pop(key, None)
+                if "BB1688_HOME" not in cli_env:
+                    base_data = os.environ.get("BIJIA_DATA_DIR")
+                    if base_data:
+                        bb_home = os.path.join(os.path.dirname(os.path.abspath(base_data)), "1688")
+                        os.makedirs(bb_home, exist_ok=True)
+                        cli_env["BB1688_HOME"] = bb_home
                 res = subprocess.run(
                     cmd,
                     cwd=self.upstream_cli_dir,
@@ -196,12 +202,17 @@ class Alibaba1688Adapter:
 
         try:
             from playwright.sync_api import sync_playwright
+            browser_exe = ProfileManager.find_system_browser()
+            launch_kwargs = {
+                "user_data_dir": pdir,
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled"]
+            }
+            if browser_exe:
+                launch_kwargs["executable_path"] = browser_exe
+
             with sync_playwright() as p:
-                context = p.chromium.launch_persistent_context(
-                    user_data_dir=pdir,
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"]
-                )
+                context = p.chromium.launch_persistent_context(**launch_kwargs)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(url, wait_until="domcontentloaded", timeout=4000)
                 page.wait_for_timeout(1000)

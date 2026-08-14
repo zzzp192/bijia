@@ -16,7 +16,12 @@ class JDAdapter:
 
     def __init__(self, use_mock_on_failure: bool = True):
         self.use_mock_on_failure = use_mock_on_failure
-        self.profile_dir = os.path.join(BASE_DIR, "browser_profiles", "jd_profile")
+        profiles_dir = os.getenv("BIJIA_PROFILES_DIR") or (
+            os.path.join(os.getenv("BIJIA_DATA_DIR"), "browser_profiles")
+            if os.getenv("BIJIA_DATA_DIR")
+            else os.path.join(BASE_DIR, "browser_profiles")
+        )
+        self.profile_dir = os.path.join(profiles_dir, "jd_profile")
         self.fixture_path = os.path.join(BASE_DIR, "fixtures", "jd_sample.json")
         self.last_login_status = "UNKNOWN"
         self.last_data_source = "NONE"

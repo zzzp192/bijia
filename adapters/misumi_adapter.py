@@ -16,7 +16,12 @@ class MisumiAdapter:
 
     def __init__(self, use_mock_on_failure: bool = True):
         self.use_mock_on_failure = use_mock_on_failure
-        self.profile_dir = os.path.join(BASE_DIR, "browser_profiles", "misumi_profile")
+        profiles_dir = os.getenv("BIJIA_PROFILES_DIR") or (
+            os.path.join(os.getenv("BIJIA_DATA_DIR"), "browser_profiles")
+            if os.getenv("BIJIA_DATA_DIR")
+            else os.path.join(BASE_DIR, "browser_profiles")
+        )
+        self.profile_dir = os.path.join(profiles_dir, "misumi_profile")
         self.fixture_path = os.path.join(BASE_DIR, "fixtures", "misumi_sample.json")
         self.last_login_status = "UNKNOWN"
         self.last_data_source = "NONE"
@@ -79,15 +84,21 @@ class MisumiAdapter:
             + urllib.parse.quote(keyword)
         )
         os.makedirs(self.profile_dir, exist_ok=True)
+        from browser.profile_manager import ProfileManager
+        browser_exe = ProfileManager.find_system_browser()
+        launch_kwargs = {
+            "user_data_dir": self.profile_dir,
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-proxy-server",
+            ],
+        }
+        if browser_exe:
+            launch_kwargs["executable_path"] = browser_exe
+
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=self.profile_dir,
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-proxy-server",
-                ],
-            )
+            context = playwright.chromium.launch_persistent_context(**launch_kwargs)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)

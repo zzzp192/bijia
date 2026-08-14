@@ -97,7 +97,7 @@ def trigger_manual_login(platform: str):
     if platform not in {"1688", "taobao", "jd", "misumi"}:
         raise HTTPException(status_code=400, detail=f"暂不支持平台登录: {platform}")
 
-    base_dir = os.path.dirname(os.path.dirname(__file__))
+    base_dir = os.getenv("BIJIA_APP_ROOT") or os.path.dirname(os.path.dirname(__file__))
     script_path = os.path.join(base_dir, "scripts", "open_login_browser.py")
     viewer_url = os.getenv("REMOTE_BROWSER_URL", "").strip() or None
     try:
@@ -258,6 +258,7 @@ def export_excel(history_id: int, db: Session = Depends(get_db)):
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
     )
 
-frontend_dist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "public")
+_base_dir = os.getenv("BIJIA_APP_ROOT") or os.path.dirname(os.path.dirname(__file__))
+frontend_dist = os.path.join(_base_dir, "frontend", "public")
 if os.path.exists(frontend_dist):
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="static")

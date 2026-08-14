@@ -18,7 +18,12 @@ class TaobaoAdapter:
 
     def __init__(self, use_mock_on_failure: bool = True):
         self.use_mock_on_failure = use_mock_on_failure
-        self.cookies_path = os.path.join(BASE_DIR, "cookies", "taobao.json")
+        cookies_dir = os.getenv("BIJIA_COOKIES_DIR") or (
+            os.path.join(os.getenv("BIJIA_DATA_DIR"), "cookies")
+            if os.getenv("BIJIA_DATA_DIR")
+            else os.path.join(BASE_DIR, "cookies")
+        )
+        self.cookies_path = os.path.join(cookies_dir, "taobao.json")
         self.fixture_path = os.path.join(BASE_DIR, "fixtures", "taobao_sample.json")
         self.last_login_status = "UNKNOWN"
         self.last_data_source = "NONE"

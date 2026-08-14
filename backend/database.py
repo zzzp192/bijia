@@ -2,7 +2,13 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
-DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+def _resolve_db_dir() -> str:
+    override = os.getenv("BIJIA_DATA_DIR")
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+
+DB_DIR = _resolve_db_dir()
 os.makedirs(DB_DIR, exist_ok=True)
 DB_PATH = os.path.join(DB_DIR, "bijia.db")
 
