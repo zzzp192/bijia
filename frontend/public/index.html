@@ -400,7 +400,7 @@
                 const resp = await apiFetch(`/api/auth/login/${platform}`, { method: 'POST' });
                 const res = await resp.json();
                 if(!resp.ok) throw new Error(res.detail || `HTTP ${resp.status}`);
-                if(res.status === 'launched') {
+                if(res.status === 'launched' || res.status === 'already_running') {
                     if(res.viewer_url) {
                         openLoginViewer(platform, res.viewer_url);
                         showToast(`✅ [${platform}] 登录画面已在网页内打开`);

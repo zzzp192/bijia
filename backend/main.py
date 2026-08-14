@@ -99,10 +99,18 @@ def trigger_manual_login(platform: str):
 
     base_dir = os.path.dirname(os.path.dirname(__file__))
     script_path = os.path.join(base_dir, "scripts", "open_login_browser.py")
+    viewer_url = os.getenv("REMOTE_BROWSER_URL", "").strip() or None
     try:
         with _login_process_lock:
             active_platform, _ = _running_login()
             if active_platform:
+                if active_platform == platform:
+                    return {
+                        "status": "already_running",
+                        "platform": platform,
+                        "viewer_url": viewer_url,
+                        "message": f"[{platform}] 登录浏览器已在运行",
+                    }
                 raise HTTPException(
                     status_code=409,
                     detail=f"{active_platform} 登录窗口正在运行，请先完成或关闭它",
@@ -116,7 +124,6 @@ def trigger_manual_login(platform: str):
             )
             _login_processes[platform] = process
 
-        viewer_url = os.getenv("REMOTE_BROWSER_URL", "").strip() or None
         return {
             "status": "launched",
             "platform": platform,

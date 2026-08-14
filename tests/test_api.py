@@ -111,6 +111,18 @@ def test_login_endpoint_prevents_overlapping_remote_browsers():
     assert "1688" in response.json()["detail"]
 
 
+def test_login_endpoint_reopens_same_running_browser():
+    running_process = type("RunningProcess", (), {"poll": lambda self: None})()
+    with patch.dict(main_module._login_processes, {"1688": running_process}, clear=True):
+        with patch.dict("os.environ", {"REMOTE_BROWSER_URL": "/remote-browser/vnc.html"}):
+            with TestClient(app) as client:
+                response = client.post("/api/auth/login/1688")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "already_running"
+    assert response.json()["viewer_url"] == "/remote-browser/vnc.html"
+
+
 def test_login_endpoint_rejects_unknown_platform():
     with TestClient(app) as client:
         response = client.post("/api/auth/login/unknown")
