@@ -21,14 +21,15 @@ def open_login_gui(platform: str = "1688"):
     result = ProfileManager.launch_login_browser(platform)
     if result == "SUCCESS":
         print(f"{platform} 登录完成，窗口可以安全关闭。")
-        return
+        return True
     print(f"{platform} 登录未完成。请查看上方错误信息后重试。")
     if sys.stdin and sys.stdin.isatty():
         try:
             input("按回车键关闭此窗口...")
         except (EOFError, KeyboardInterrupt):
             pass
+    return False
 
 if __name__ == "__main__":
     plat = sys.argv[1] if len(sys.argv) > 1 else "1688"
-    open_login_gui(plat)
+    sys.exit(0 if open_login_gui(plat) else 1)

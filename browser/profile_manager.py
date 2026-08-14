@@ -102,7 +102,11 @@ class ProfileManager:
                 context = p.chromium.launch_persistent_context(
                     user_data_dir=pdir,
                     headless=False,
-                    args=["--disable-blink-features=AutomationControlled"]
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--window-size=1200,800",
+                    ]
                 )
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(target_url)
@@ -125,6 +129,7 @@ class ProfileManager:
                     headless=False,
                     args=[
                         "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
                         "--window-size=1200,800",
                     ],
                 )
@@ -231,6 +236,7 @@ class ProfileManager:
                     headless=False,
                     args=[
                         "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
                         "--no-proxy-server",
                         "--window-size=1280,900",
                     ],

@@ -10,6 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg python3 python3-venv xvfb \
+        fluxbox x11vnc novnc websockify \
         fonts-noto-cjk fonts-liberation \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
@@ -37,8 +38,9 @@ RUN cd vendor/1688-cli \
     && npm cache clean --force
 
 COPY . .
-RUN mkdir -p /app/data /app/cookies /app/browser_profiles /app/runtime/1688
+RUN mkdir -p /app/data /app/cookies /app/browser_profiles /app/runtime/1688 \
+    && chmod +x /app/scripts/start_container.sh
 
-EXPOSE 8000
+EXPOSE 8000 6080
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+CMD ["/app/scripts/start_container.sh"]

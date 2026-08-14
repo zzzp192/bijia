@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import subprocess
+import threading
 from urllib.parse import quote
 from typing import List, Optional, Literal
 from fastapi import FastAPI, Depends, HTTPException, Response, Query
@@ -34,6 +35,16 @@ app.add_middleware(
 )
 
 query_service = QueryService()
+_login_processes = {}
+_login_process_lock = threading.Lock()
+
+
+def _running_login():
+    """Return the currently active login helper, if any."""
+    for active_platform, process in _login_processes.items():
+        if process.poll() is None:
+            return active_platform, process
+    return None, None
 
 class InquiryRequest(BaseModel):
     query_mode: Literal["model", "keyword"] = Field("model", description="model=品牌型号严格匹配；keyword=关键词发现")
@@ -79,7 +90,8 @@ def run_inquiry(req: InquiryRequest, db: Session = Depends(get_db)):
 @app.post("/api/auth/login/{platform}")
 def trigger_manual_login(platform: str):
     """
-    触发人工扫码登录：强制在 Windows 上使用 CREATE_NEW_CONSOLE 弹出独立桌面 Chrome 窗口
+    触发人工扫码登录。本地 Windows 使用桌面窗口，部署环境通过
+    REMOTE_BROWSER_URL 把服务器上的可视化 Chrome 嵌入网页。
     """
     platform = platform.lower().strip()
     if platform not in {"1688", "taobao", "jd", "misumi"}:
@@ -88,19 +100,56 @@ def trigger_manual_login(platform: str):
     base_dir = os.path.dirname(os.path.dirname(__file__))
     script_path = os.path.join(base_dir, "scripts", "open_login_browser.py")
     try:
-        creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-        subprocess.Popen(
-            [sys.executable, "-u", script_path, platform],
-            cwd=base_dir,
-            creationflags=creationflags,
-        )
+        with _login_process_lock:
+            active_platform, _ = _running_login()
+            if active_platform:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{active_platform} 登录窗口正在运行，请先完成或关闭它",
+                )
+
+            creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+            process = subprocess.Popen(
+                [sys.executable, "-u", script_path, platform],
+                cwd=base_dir,
+                creationflags=creationflags,
+            )
+            _login_processes[platform] = process
+
+        viewer_url = os.getenv("REMOTE_BROWSER_URL", "").strip() or None
         return {
             "status": "launched",
             "platform": platform,
-            "message": f"已成功在桌面强制弹出 [{platform}] 独立登录窗口！"
+            "viewer_url": viewer_url,
+            "message": (
+                f"已启动 [{platform}] 服务器登录浏览器"
+                if viewer_url
+                else f"已在桌面打开 [{platform}] 独立登录窗口"
+            ),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"弹出浏览器失败: {e}")
+
+
+@app.get("/api/auth/login/{platform}/status")
+def get_manual_login_status(platform: str):
+    platform = platform.lower().strip()
+    if platform not in {"1688", "taobao", "jd", "misumi"}:
+        raise HTTPException(status_code=400, detail=f"暂不支持平台登录: {platform}")
+
+    process = _login_processes.get(platform)
+    if process is None:
+        return {"status": "idle", "platform": platform}
+    return_code = process.poll()
+    if return_code is None:
+        return {"status": "running", "platform": platform}
+    return {
+        "status": "completed" if return_code == 0 else "failed",
+        "platform": platform,
+        "return_code": return_code,
+    }
 
 @app.get("/api/history")
 def get_query_history(db: Session = Depends(get_db), limit: int = 20):

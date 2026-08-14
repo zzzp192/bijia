@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
 from backend.main import app
+from backend import main as main_module
 
 
 def test_inquiry_metadata_and_unicode_excel_download():
@@ -73,9 +74,10 @@ def test_inquiry_rejects_non_positive_quantity():
 
 
 def test_login_endpoint_launches_unbuffered_helper_in_project_directory():
-    with patch("backend.main.subprocess.Popen") as popen:
-        with TestClient(app) as client:
-            response = client.post("/api/auth/login/1688")
+    with patch.dict(main_module._login_processes, {}, clear=True):
+        with patch("backend.main.subprocess.Popen") as popen:
+            with TestClient(app) as client:
+                response = client.post("/api/auth/login/1688")
 
     assert response.status_code == 200
     command = popen.call_args.args[0]
@@ -83,6 +85,30 @@ def test_login_endpoint_launches_unbuffered_helper_in_project_directory():
     assert command[1] == "-u"
     assert command[-1] == "1688"
     assert options["cwd"].endswith("bijia")
+
+
+def test_login_endpoint_returns_remote_viewer_and_status():
+    with patch.dict(main_module._login_processes, {}, clear=True):
+        with patch.dict("os.environ", {"REMOTE_BROWSER_URL": "/remote-browser/vnc.html"}):
+            with patch("backend.main.subprocess.Popen") as popen:
+                popen.return_value.poll.return_value = None
+                with TestClient(app) as client:
+                    launched = client.post("/api/auth/login/taobao")
+                    status = client.get("/api/auth/login/taobao/status")
+
+    assert launched.status_code == 200
+    assert launched.json()["viewer_url"] == "/remote-browser/vnc.html"
+    assert status.json()["status"] == "running"
+
+
+def test_login_endpoint_prevents_overlapping_remote_browsers():
+    running_process = type("RunningProcess", (), {"poll": lambda self: None})()
+    with patch.dict(main_module._login_processes, {"1688": running_process}, clear=True):
+        with TestClient(app) as client:
+            response = client.post("/api/auth/login/jd")
+
+    assert response.status_code == 409
+    assert "1688" in response.json()["detail"]
 
 
 def test_login_endpoint_rejects_unknown_platform():
@@ -148,9 +174,10 @@ def test_keyword_mode_rejects_empty_keyword():
 
 
 def test_jd_login_endpoint_is_available():
-    with patch("backend.main.subprocess.Popen") as popen:
-        with TestClient(app) as client:
-            response = client.post("/api/auth/login/jd")
+    with patch.dict(main_module._login_processes, {}, clear=True):
+        with patch("backend.main.subprocess.Popen") as popen:
+            with TestClient(app) as client:
+                response = client.post("/api/auth/login/jd")
 
     assert response.status_code == 200
     assert popen.call_args.args[0][-1] == "jd"
@@ -237,9 +264,10 @@ def test_candidate_limit_validation():
 
 
 def test_misumi_login_endpoint_is_available():
-    with patch("backend.main.subprocess.Popen") as popen:
-        with TestClient(app) as client:
-            response = client.post("/api/auth/login/misumi")
+    with patch.dict(main_module._login_processes, {}, clear=True):
+        with patch("backend.main.subprocess.Popen") as popen:
+            with TestClient(app) as client:
+                response = client.post("/api/auth/login/misumi")
 
     assert response.status_code == 200
     assert popen.call_args.args[0][-1] == "misumi"

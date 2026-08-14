@@ -12,8 +12,11 @@ services:
       TZ: Asia/Shanghai
       BB1688_HOME: /app/runtime/1688
       CHROME_PATH: /usr/bin/google-chrome
+      DISPLAY: :99
+      REMOTE_BROWSER_URL: /remote-browser/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=remote-browser/websockify
     ports:
       - "127.0.0.1:18080:8000"
+      - "127.0.0.1:16080:6080"
     volumes:
       - bijia_data:/app/data
       - bijia_cookies:/app/cookies
