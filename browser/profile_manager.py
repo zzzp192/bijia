@@ -256,7 +256,7 @@ class ProfileManager:
 
             process = launch_chrome(
                 port=9222,
-                user_data_dir=pdir,
+                profile_dir=pdir,
                 headless=False,
                 url="https://passport.jd.com/new/login.aspx",
             )

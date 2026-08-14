@@ -1,3 +1,5 @@
+import sys
+import types
 from types import SimpleNamespace
 
 from browser.profile_manager import ProfileManager
@@ -56,6 +58,26 @@ def test_jd_login_routes_to_dedicated_profile(monkeypatch):
 
     assert ProfileManager.launch_login_browser("jd") == "SUCCESS"
     assert captured[0].endswith("jd_profile")
+
+
+def test_jd_login_passes_cdp_profile_dir_keyword(monkeypatch, tmp_path):
+    captured = []
+
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    fake_cdp = types.ModuleType("cn_scraper_mcp.engines.cdp")
+    fake_cdp.launch_chrome = lambda **kwargs: captured.append(kwargs) or FakeProcess()
+    monkeypatch.setitem(sys.modules, "cn_scraper_mcp.engines.cdp", fake_cdp)
+
+    assert ProfileManager._launch_jd_login(str(tmp_path)) == "SUCCESS"
+    assert captured == [{
+        "port": 9222,
+        "profile_dir": str(tmp_path),
+        "headless": False,
+        "url": "https://passport.jd.com/new/login.aspx",
+    }]
 
 
 def test_misumi_login_routes_to_dedicated_profile(monkeypatch):
