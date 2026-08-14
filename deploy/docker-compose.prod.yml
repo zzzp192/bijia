@@ -1,0 +1,35 @@
+services:
+  bijia:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: efmat/bijia:latest
+    container_name: efmat-bijia
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    environment:
+      TZ: Asia/Shanghai
+      BB1688_HOME: /app/runtime/1688
+      CHROME_PATH: /usr/bin/google-chrome
+    ports:
+      - "127.0.0.1:18080:8000"
+    volumes:
+      - bijia_data:/app/data
+      - bijia_cookies:/app/cookies
+      - bijia_profiles:/app/browser_profiles
+      - bijia_1688:/app/runtime/1688
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  bijia_data:
+  bijia_cookies:
+  bijia_profiles:
+  bijia_1688:
